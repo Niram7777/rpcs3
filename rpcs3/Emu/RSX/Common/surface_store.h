@@ -507,7 +507,7 @@ namespace rsx
 //			u32 clip_x = clip_horizontal_reg;
 //			u32 clip_y = clip_vertical_reg;
 
-			cache_tag++;
+			cache_tag = rsx::get_shared_tag();
 			m_memory_tree.clear();
 
 			// Make previous RTTs sampleable
@@ -723,7 +723,7 @@ namespace rsx
 						invalidated_resources.push_back(std::move(It->second));
 						m_render_targets_storage.erase(It);
 
-						cache_tag++;
+						cache_tag = rsx::get_shared_tag();
 						return;
 					}
 				}
@@ -741,7 +741,7 @@ namespace rsx
 						invalidated_resources.push_back(std::move(It->second));
 						m_depth_stencil_storage.erase(It);
 
-						cache_tag++;
+						cache_tag = rsx::get_shared_tag();
 						return;
 					}
 				}
@@ -768,7 +768,7 @@ namespace rsx
 					invalidated_resources.push_back(std::move(It->second));
 					m_render_targets_storage.erase(It);
 
-					cache_tag++;
+					cache_tag = rsx::get_shared_tag();
 					return;
 				}
 			}
@@ -781,7 +781,7 @@ namespace rsx
 					invalidated_resources.push_back(std::move(It->second));
 					m_depth_stencil_storage.erase(It);
 
-					cache_tag++;
+					cache_tag = rsx::get_shared_tag();
 					return;
 				}
 			}
@@ -1138,7 +1138,7 @@ namespace rsx
 
 		void notify_memory_structure_changed()
 		{
-			cache_tag++;
+			cache_tag = rsx::get_shared_tag();
 		}
 	};
 }
