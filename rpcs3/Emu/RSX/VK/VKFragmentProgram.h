@@ -29,7 +29,7 @@ protected:
 	virtual std::string compareFunction(COMPARE, const std::string&, const std::string&) override;
 
 	virtual void insertHeader(std::stringstream &OS) override;
-	virtual void insertIntputs(std::stringstream &OS) override;
+	virtual void insertInputs(std::stringstream &OS) override;
 	virtual void insertOutputs(std::stringstream &OS) override;
 	virtual void insertConstants(std::stringstream &OS) override;
 	virtual void insertGlobalFunctions(std::stringstream &OS) override;
@@ -49,7 +49,7 @@ public:
 	ParamArray parr;
 	VkShaderModule handle = nullptr;
 	u32 id;
-	std::string shader;
+	vk::glsl::shader shader;
 	std::vector<size_t> FragmentConstantOffsetCache;
 
 	std::array<u32, 4> output_color_masks{ {} };

@@ -9,8 +9,17 @@
 #include <QActionGroup>
 #include <QScrollBar>
 #include <QTabBar>
+#include <QVBoxLayout>
 
+#include <deque>
+#include <mutex>
+#include "Utilities/mutex.h"
+#include "Utilities/lockless.h"
+
+extern fs::file g_tty;
 extern atomic_t<s64> g_tty_size;
+extern std::array<std::deque<std::string>, 16> g_tty_input;
+extern std::mutex g_tty_mutex;
 
 constexpr auto qstr = QString::fromStdString;
 
@@ -18,29 +27,18 @@ struct gui_listener : logs::listener
 {
 	atomic_t<logs::level> enabled{logs::level::_uninit};
 
-	struct packet
+	struct packet_t
 	{
-		atomic_t<packet*> next{};
-
 		logs::level sev{};
 		std::string msg;
-
-		~packet()
-		{
-			for (auto ptr = next.raw(); UNLIKELY(ptr);)
-			{
-				delete std::exchange(ptr, std::exchange(ptr->next.raw(), nullptr));
-			}
-		}
 	};
 
-	atomic_t<packet*> last; // Packet for writing another packet
-	atomic_t<packet*> read; // Packet for reading
+	lf_queue_slice<packet_t> pending;
+
+	lf_queue<packet_t> queue;
 
 	gui_listener()
 		: logs::listener()
-		, last(new packet)
-		, read(+last)
 	{
 		// Self-registration
 		logs::listener::add(this);
@@ -48,7 +46,6 @@ struct gui_listener : logs::listener
 
 	~gui_listener()
 	{
-		delete read;
 	}
 
 	void log(u64 stamp, const logs::message& msg, const std::string& prefix, const std::string& text)
@@ -57,7 +54,7 @@ struct gui_listener : logs::listener
 
 		if (msg.sev <= enabled)
 		{
-			const auto _new = new packet;
+			packet_t p,* _new = &p;
 			_new->sev = msg.sev;
 
 			if (prefix.size() > 0)
@@ -80,24 +77,24 @@ struct gui_listener : logs::listener
 			_new->msg += text;
 			_new->msg += '\n';
 
-			last.exchange(_new)->next = _new;
+			queue.push(std::move(p));
 		}
 	}
 
 	void pop()
 	{
-		if (const auto head = read->next.exchange(nullptr))
-		{
-			delete read.exchange(head);
-		}
+		pending.pop_front();
 	}
 
-	void clear()
+	packet_t* get()
 	{
-		while (read->next)
+		if (packet_t* _head = pending.get())
 		{
-			pop();
+			return _head;
 		}
+
+		pending = queue.pop_all();
+		return pending.get();
 	}
 };
 
@@ -123,13 +120,31 @@ log_frame::log_frame(std::shared_ptr<gui_settings> guiSettings, QWidget *parent)
 	m_tty->setContextMenuPolicy(Qt::CustomContextMenu);
 	m_tty->installEventFilter(this);
 
+	m_tty_input = new QLineEdit();
+	if (m_tty_channel >= 0)
+	{
+		m_tty_input->setPlaceholderText(tr("Channel %0").arg(m_tty_channel));
+	}
+	else
+	{
+		m_tty_input->setPlaceholderText(tr("All User Channels"));
+	}
+
+	QVBoxLayout* tty_layout = new QVBoxLayout();
+	tty_layout->addWidget(m_tty);
+	tty_layout->addWidget(m_tty_input);
+	tty_layout->setContentsMargins(0, 0, 0, 0);
+
+	m_tty_container = new QWidget();
+	m_tty_container->setLayout(tty_layout);
+
 	m_tabWidget->addTab(m_log, tr("Log"));
-	m_tabWidget->addTab(m_tty, tr("TTY"));
+	m_tabWidget->addTab(m_tty_container, tr("TTY"));
 
 	setWidget(m_tabWidget);
 
 	// Open or create TTY.log
-	m_tty_file.open(fs::get_config_dir() + "TTY.log", fs::read + fs::create);
+	m_tty_file.open(fs::get_cache_dir() + "TTY.log", fs::read + fs::create);
 
 	CreateAndConnectActions();
 
@@ -212,6 +227,30 @@ void log_frame::CreateAndConnectActions()
 	m_clearTTYAct = new QAction(tr("Clear"), this);
 	connect(m_clearTTYAct, &QAction::triggered, m_tty, &QTextEdit::clear);
 
+	m_tty_channel_acts = new QActionGroup(this);
+
+	// Special Channel: All
+	QAction* all_channels_act = new QAction(tr("All user channels"), m_tty_channel_acts);
+	all_channels_act->setCheckable(true);
+	all_channels_act->setChecked(m_tty_channel == -1);
+	connect(all_channels_act, &QAction::triggered, [this]()
+	{
+		m_tty_channel = -1;
+		m_tty_input->setPlaceholderText(tr("All user channels"));
+	});
+
+	for (int i = 3; i < 16; i++)
+	{
+		QAction* act = new QAction(tr("Channel %0").arg(i), m_tty_channel_acts);
+		act->setCheckable(true);
+		act->setChecked(i == m_tty_channel);
+		connect(act, &QAction::triggered, [this, i]()
+		{
+			m_tty_channel = i;
+			m_tty_input->setPlaceholderText(tr("Channel %0").arg(m_tty_channel));
+		});
+	}
+
 	// Action groups make these actions mutually exclusive.
 	m_logLevels = new QActionGroup(this);
 	m_nothingAct = new QAction(tr("Nothing"), m_logLevels);
@@ -253,7 +292,7 @@ void log_frame::CreateAndConnectActions()
 		QMenu* menu = m_log->createStandardContextMenu();
 		menu->addAction(m_clearAct);
 		menu->addSeparator();
-		menu->addActions({ m_nothingAct, m_fatalAct, m_errorAct, m_todoAct, m_successAct, m_warningAct, m_noticeAct, m_traceAct });
+		menu->addActions(m_logLevels->actions());
 		menu->addSeparator();
 		menu->addAction(m_stackAct);
 		menu->addSeparator();
@@ -265,6 +304,8 @@ void log_frame::CreateAndConnectActions()
 	{
 		QMenu* menu = m_tty->createStandardContextMenu();
 		menu->addAction(m_clearTTYAct);
+		menu->addSeparator();
+		menu->addActions(m_tty_channel_acts->actions());
 		menu->exec(mapToGlobal(pos));
 	});
 
@@ -272,6 +313,42 @@ void log_frame::CreateAndConnectActions()
 	{
 		if (m_find_dialog)
 			m_find_dialog->close();
+	});
+
+	connect(m_tty_input, &QLineEdit::returnPressed, [this]()
+	{
+		std::string text = m_tty_input->text().toStdString();
+
+		{
+			std::lock_guard lock(g_tty_mutex);
+
+			if (m_tty_channel == -1)
+			{
+				for (int i = 3; i < 16; i++)
+				{
+					g_tty_input[i].push_back(text + "\n");
+				}
+			}
+			else
+			{
+				g_tty_input[m_tty_channel].push_back(text + "\n");
+			}
+		}
+
+		// Write to tty
+		if (m_tty_channel == -1)
+		{
+			text = "All channels > " + text + "\n";
+		}
+		else
+		{
+			text = fmt::format("%s > %s\n", "Ch.%d", m_tty_channel, text);
+		}
+		g_tty_size -= (1ll << 48);
+		g_tty.write(text.c_str(), text.size());
+		g_tty_size += (1ll << 48) + text.size();
+
+		m_tty_input->clear();
 	});
 
 	LoadSettings();
@@ -285,9 +362,12 @@ void log_frame::LoadSettings()
 	m_stackAct->setChecked(m_stack_log);
 }
 
-//TODO: repaint old text with new colors
 void log_frame::RepaintTextColors()
 {
+	// Backup old colors
+	QColor old_color_stack{ m_color_stack };
+	QList<QColor> old_color{ m_color };
+
 	// Get text color. Do this once to prevent possible slowdown
 	m_color.clear();
 	m_color.append(gui::utils::get_label_color("log_level_always"));
@@ -301,7 +381,57 @@ void log_frame::RepaintTextColors()
 
 	m_color_stack = gui::utils::get_label_color("log_stack");
 
+	// Repaint TTY with new colors
 	m_tty->setTextColor(gui::utils::get_label_color("tty_text"));
+
+	// Repaint log with new colors
+	QTextCursor text_cursor{ m_log->document() };
+	text_cursor.movePosition(QTextCursor::Start);
+
+	// Go through each line
+	while (!text_cursor.atEnd())
+	{
+		// Jump to the next line, unless this is the first one
+		if (!text_cursor.atStart())
+			text_cursor.movePosition(QTextCursor::NextBlock);
+
+		// Go through each word in the current line
+		while (!text_cursor.atBlockEnd())
+		{
+			// Remove old selection and select a new character (NextWord has proven to be glitchy here)
+			text_cursor.movePosition(QTextCursor::NoMove);
+			text_cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
+
+			// Skip if no color needed
+			if (text_cursor.selectedText() == " ")
+				continue;
+
+			// Get current chars color
+			QTextCharFormat text_format = text_cursor.charFormat();
+			QColor col = text_format.foreground().color();
+
+			// Get the new color for this word
+			if (col == old_color_stack)
+			{
+				text_format.setForeground(m_color_stack);
+			}
+			else
+			{
+				for (int i = 0; i < old_color.count(); i++)
+				{
+					if (col == old_color[i])
+					{
+						text_format.setForeground(m_color[i]);
+						break;
+					}
+				}
+			}
+
+			// Reinsert the same text with the new color
+			text_cursor.movePosition(QTextCursor::EndOfWord, QTextCursor::KeepAnchor);
+			text_cursor.insertText(text_cursor.selectedText(), text_format);
+		}
+	}
 }
 
 void log_frame::UpdateUI()
@@ -323,9 +453,37 @@ void log_frame::UpdateUI()
 
 		if (buf.size() && m_TTYAct->isChecked())
 		{
+			// save old scroll bar state
+			QScrollBar *sb = m_tty->verticalScrollBar();
+			const int sb_pos = sb->value();
+			const bool is_max = sb_pos == sb->maximum();
+
+			// save old selection
 			QTextCursor text_cursor{m_tty->document()};
+			const int sel_pos = text_cursor.position();
+			int sel_start = text_cursor.selectionStart();
+			int sel_end = text_cursor.selectionEnd();
+
+			// clear selection or else it will get colorized as well
+			text_cursor.clearSelection();
+
+			// write text to the end
 			text_cursor.movePosition(QTextCursor::End);
 			text_cursor.insertText(qstr(buf));
+
+			// if we mark text from right to left we need to swap sides (start is always smaller than end)
+			if (sel_pos < sel_end)
+			{
+				std::swap(sel_start, sel_end);
+			}
+
+			// reset old text cursor and selection
+			text_cursor.setPosition(sel_start);
+			text_cursor.setPosition(sel_end, QTextCursor::KeepAnchor);
+			m_tty->setTextCursor(text_cursor);
+
+			// set scrollbar to max means auto-scroll
+			sb->setValue(is_max ? sb->maximum() : sb_pos);
 		}
 
 		// Limit processing time
@@ -333,7 +491,7 @@ void log_frame::UpdateUI()
 	}
 
 	// Check main logs
-	while (const auto packet = s_gui_listener.read->next.load())
+	while (auto* packet = s_gui_listener.get())
 	{
 		// Confirm log level
 		if (packet->sev <= s_gui_listener.enabled)

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "GCM.h"
 #include "RSXTexture.h"
 
@@ -216,9 +216,9 @@ static const std::string rsx_fp_op_names[] =
 
 struct RSXFragmentProgram
 {
-	u32 size;
 	void *addr;
 	u32 offset;
+	u32 ucode_length;
 	u32 ctrl;
 	u16 unnormalized_coords;
 	u16 redirected_textures;
@@ -230,7 +230,7 @@ struct RSXFragmentProgram
 	bool front_color_specular_output : 1;
 	u32 texture_dimensions;
 
-	std::array<float, 4> texture_scale[16];
+	float texture_scale[16][4];
 	u8 textures_alpha_kill[16];
 	u8 textures_zfunc[16];
 
@@ -239,15 +239,6 @@ struct RSXFragmentProgram
 	rsx::texture_dimension_extended get_texture_dimension(u8 id) const
 	{
 		return (rsx::texture_dimension_extended)((texture_dimensions >> (id * 2)) & 0x3);
-	}
-
-	void set_texture_dimension(const std::array<rsx::texture_dimension_extended, 16> &dimensions)
-	{
-		texture_dimensions = 0;
-		for (u32 i = 0, offset = 0; i < 16; ++i, offset += 2)
-		{
-			texture_dimensions |= (u32)dimensions[i] << offset;
-		}
 	}
 
 	RSXFragmentProgram()

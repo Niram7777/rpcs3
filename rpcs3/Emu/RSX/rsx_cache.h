@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Utilities/VirtualMemory.h"
 #include "Utilities/hash.h"
 #include "Emu/Memory/vm.h"
@@ -6,246 +6,379 @@
 #include "Common/ProgramStateCache.h"
 #include "Emu/Cell/Modules/cellMsgDialog.h"
 #include "Emu/System.h"
+#include "Common/texture_cache_checker.h"
+
+#include "rsx_utils.h"
+#include <thread>
 
 namespace rsx
 {
-	struct blit_src_info
-	{
-		blit_engine::transfer_source_format format;
-		blit_engine::transfer_origin origin;
-		u16 offset_x;
-		u16 offset_y;
-		u16 width;
-		u16 height;
-		u16 slice_h;
-		u16 pitch;
-		void *pixels;
-
-		bool compressed_x;
-		bool compressed_y;
-		u32 rsx_address;
-	};
-
-	struct blit_dst_info
-	{
-		blit_engine::transfer_destination_format format;
-		u16 offset_x;
-		u16 offset_y;
-		u16 width;
-		u16 height;
-		u16 pitch;
-		u16 clip_x;
-		u16 clip_y;
-		u16 clip_width;
-		u16 clip_height;
-		u16 max_tile_h;
-		f32 scale_x;
-		f32 scale_y;
-
-		bool swizzled;
-		void *pixels;
-
-		bool compressed_x;
-		bool compressed_y;
-		u32  rsx_address;
-	};
-
 	enum protection_policy
 	{
-		protect_policy_one_page,	//Only guard one page, preferrably one where this section 'wholly' fits
+		protect_policy_one_page,     //Only guard one page, preferrably one where this section 'wholly' fits
 		protect_policy_conservative, //Guards as much memory as possible that is guaranteed to only be covered by the defined range without sharing
-		protect_policy_full_range	//Guard the full memory range. Shared pages may be invalidated by access outside the object we're guarding
+		protect_policy_full_range    //Guard the full memory range. Shared pages may be invalidated by access outside the object we're guarding
 	};
+
+	enum section_bounds
+	{
+		full_range,
+		locked_range,
+		confirmed_range
+	};
+
+	static inline void memory_protect(const address_range& range, utils::protection prot)
+	{
+		verify(HERE), range.is_page_range();
+
+		//LOG_ERROR(RSX, "memory_protect(0x%x, 0x%x, %x)", static_cast<u32>(range.start), static_cast<u32>(range.length()), static_cast<u32>(prot));
+		utils::memory_protect(vm::base(range.start), range.length(), prot);
+
+#ifdef TEXTURE_CACHE_DEBUG
+		tex_cache_checker.set_protection(range, prot);
+#endif
+	}
 
 	class buffered_section
 	{
-	private:
-		u32 locked_address_base = 0;
-		u32 locked_address_range = 0;
+	public:
+		static const protection_policy guard_policy = protect_policy_full_range;
 
-	protected:
-		u32 cpu_address_base = 0;
-		u32 cpu_address_range = 0;
+	private:
+		address_range locked_range;
+		address_range cpu_range = {};
+		address_range confirmed_range;
 
 		utils::protection protection = utils::protection::rw;
-		protection_policy guard_policy;
 
 		bool locked = false;
-		bool dirty = false;
 
-		inline bool region_overlaps(u32 base1, u32 limit1, u32 base2, u32 limit2) const
+		inline void init_lockable_range(const address_range &range)
 		{
-			return (base1 < limit2 && base2 < limit1);
+			locked_range = range.to_page_range();
+
+			if ((guard_policy != protect_policy_full_range) && (range.length() >= 4096))
+			{
+				const u32 block_start = (locked_range.start < range.start) ? (locked_range.start + 4096u) : locked_range.start;
+				const u32 block_end = locked_range.end;
+
+				if (block_start < block_end)
+				{
+					// protect unique page range
+					locked_range.start = block_start;
+					locked_range.end = block_end;
+				}
+
+				if (guard_policy == protect_policy_one_page)
+				{
+					// protect exactly one page
+					locked_range.set_length(4096u);
+				}
+			}
+
+			AUDIT( (locked_range.start == page_start(range.start)) || (locked_range.start == next_page(range.start)) );
+			AUDIT( locked_range.end <= page_end(range.end) );
+			verify(HERE), locked_range.is_page_range();
 		}
 
 	public:
 
-		buffered_section() {}
-		~buffered_section() {}
+		buffered_section() {};
+		~buffered_section() {};
 
-		void reset(u32 base, u32 length, protection_policy protect_policy= protect_policy_full_range)
+		void reset(const address_range &memory_range)
 		{
-			verify(HERE), locked == false;
+			verify(HERE), memory_range.valid() && locked == false;
 
-			cpu_address_base = base;
-			cpu_address_range = length;
+			cpu_range = address_range(memory_range);
+			confirmed_range.invalidate();
+			locked_range.invalidate();
 
-			locked_address_base = (base & ~4095);
+			protection = utils::protection::rw;
+			locked = false;
 
-			if ((protect_policy != protect_policy_full_range) && (length >= 4096))
+			init_lockable_range(cpu_range);
+		}
+
+	protected:
+		void invalidate_range()
+		{
+			ASSERT(!locked);
+
+			cpu_range.invalidate();
+			confirmed_range.invalidate();
+			locked_range.invalidate();
+		}
+
+	public:
+		void protect(utils::protection new_prot, bool force = false)
+		{
+			if (new_prot == protection && !force) return;
+
+			verify(HERE), locked_range.is_page_range();
+			AUDIT( !confirmed_range.valid() || confirmed_range.inside(cpu_range) );
+
+#ifdef TEXTURE_CACHE_DEBUG
+			if (new_prot != protection || force)
 			{
-				const u32 limit = base + length;
-				const u32 block_end = (limit & ~4095);
-				const u32 block_start = (locked_address_base < base) ? (locked_address_base + 4096) : locked_address_base;
+				if (locked && !force) // When force=true, it is the responsibility of the caller to remove this section from the checker refcounting
+					tex_cache_checker.remove(locked_range, protection);
+				if (new_prot != utils::protection::rw)
+					tex_cache_checker.add(locked_range, new_prot);
+			}
+#endif // TEXTURE_CACHE_DEBUG
 
-				locked_address_range = 4096;
+			rsx::memory_protect(locked_range, new_prot);
+			protection = new_prot;
+			locked = (protection != utils::protection::rw);
 
-				if (block_start < block_end)
+			if (protection == utils::protection::no)
+			{
+				tag_memory();
+			}
+			else
+			{
+				if (!locked)
 				{
-					//Page boundaries cover at least one unique page
-					locked_address_base = block_start;
-
-					if (protect_policy == protect_policy_conservative)
-					{
-						//Protect full unique range
-						locked_address_range = (block_end - block_start);
-					}
+					//Unprotect range also invalidates secured range
+					confirmed_range.invalidate();
 				}
 			}
-			else
-				locked_address_range = align(base + length, 4096) - locked_address_base;
 
-			verify(HERE), locked_address_range > 0;
-			protection = utils::protection::rw;
-			guard_policy = protect_policy;
-			locked = false;
 		}
 
-		void protect(utils::protection prot)
+		void protect(utils::protection prot, const std::pair<u32, u32>& new_confirm)
 		{
-			if (prot == protection) return;
+			// new_confirm.first is an offset after cpu_range.start
+			// new_confirm.second is the length (after cpu_range.start + new_confirm.first)
 
-			verify(HERE), locked_address_range > 0;
-			utils::memory_protect(vm::base(locked_address_base), locked_address_range, prot);
-			protection = prot;
-			locked = prot != utils::protection::rw;
+#ifdef TEXTURE_CACHE_DEBUG
+			// We need to remove the lockable range from page_info as we will be re-protecting with force==true
+			if (locked)
+				tex_cache_checker.remove(locked_range, protection);
+#endif
+
+			if (prot != utils::protection::rw)
+			{
+				if (confirmed_range.valid())
+				{
+					confirmed_range.start = std::min(confirmed_range.start, cpu_range.start + new_confirm.first);
+					confirmed_range.end = std::max(confirmed_range.end, cpu_range.start + new_confirm.first + new_confirm.second - 1);
+				}
+				else
+				{
+					confirmed_range = address_range::start_length(cpu_range.start + new_confirm.first, new_confirm.second);
+					ASSERT(!locked || locked_range.inside(confirmed_range.to_page_range()));
+				}
+
+				verify(HERE), confirmed_range.inside(cpu_range);
+				init_lockable_range(confirmed_range);
+			}
+
+			protect(prot, true);
 		}
 
-		void unprotect()
+		inline void unprotect()
 		{
+			AUDIT(protection != utils::protection::rw);
 			protect(utils::protection::rw);
-			locked = false;
 		}
 
-		void discard()
+		inline void discard()
 		{
+#ifdef TEXTURE_CACHE_DEBUG
+			if (locked)
+				tex_cache_checker.remove(locked_range, protection);
+#endif
+
 			protection = utils::protection::rw;
-			dirty = true;
+			confirmed_range.invalidate();
 			locked = false;
 		}
 
-		/**
-		* Check if range overlaps with this section.
-		* ignore_protection_range - if true, the test should not check against the aligned protection range, instead
-		* tests against actual range of contents in memory
-		*/
-		bool overlaps(std::pair<u32, u32> range) const
+		inline const address_range& get_bounds(section_bounds bounds) const
 		{
-			return region_overlaps(locked_address_base, locked_address_base + locked_address_range, range.first, range.first + range.second);
+			switch (bounds)
+			{
+			case section_bounds::full_range:
+				return cpu_range;
+			case section_bounds::locked_range:
+				return locked_range;
+			case section_bounds::confirmed_range:
+				return confirmed_range.valid() ? confirmed_range : cpu_range;
+			default:
+				ASSUME(0);
+			}
 		}
 
-		bool overlaps(u32 address, bool ignore_protection_range) const
-		{
-			if (!ignore_protection_range)
-				return (locked_address_base <= address && (address - locked_address_base) < locked_address_range);
-			else
-				return (cpu_address_base <= address && (address - cpu_address_base) < cpu_address_range);
-		}
-
-		bool overlaps(std::pair<u32, u32> range, bool ignore_protection_range) const
-		{
-			if (!ignore_protection_range)
-				return region_overlaps(locked_address_base, locked_address_base + locked_address_range, range.first, range.first + range.second);
-			else
-				return region_overlaps(cpu_address_base, cpu_address_base + cpu_address_range, range.first, range.first + range.second);
-		}
 
 		/**
-		 * Check if the page containing the address tramples this section. Also compares a former trampled page range to compare
-		 * If true, returns the range <min, max> with updated invalid range 
+		 * Overlapping checks
 		 */
-		std::tuple<bool, std::pair<u32, u32>> overlaps_page(std::pair<u32, u32> old_range, u32 address, bool full_range_check) const
+		inline bool overlaps(const u32 address, section_bounds bounds) const
 		{
-			const u32 page_base = address & ~4095;
-			const u32 page_limit = address + 4096;
-
-			const u32 compare_min = std::min(old_range.first, page_base);
-			const u32 compare_max = std::max(old_range.second, page_limit);
-
-			u32 memory_base, memory_range;
-			if (full_range_check && guard_policy != protection_policy::protect_policy_full_range)
-			{
-				//Make sure protection range is full range
-				memory_base = (cpu_address_base & ~4095);
-				memory_range = align(cpu_address_base + cpu_address_range, 4096u) - memory_base;
-			}
-			else
-			{
-				memory_base = locked_address_base;
-				memory_range = locked_address_range;
-			}
-
-			if (!region_overlaps(memory_base, memory_base + memory_range, compare_min, compare_max))
-				return std::make_tuple(false, old_range);
-
-			const u32 _min = std::min(memory_base, compare_min);
-			const u32 _max = std::max(memory_base + memory_range, compare_max);
-			return std::make_tuple(true, std::make_pair(_min, _max));
+			return get_bounds(bounds).overlaps(address);
 		}
 
-		bool is_locked() const
+		inline bool overlaps(const address_range &other, section_bounds bounds) const
+		{
+			return get_bounds(bounds).overlaps(other);
+		}
+
+		inline bool overlaps(const address_range_vector &other, section_bounds bounds) const
+		{
+			return get_bounds(bounds).overlaps(other);
+		}
+
+		inline bool overlaps(const buffered_section &other, section_bounds bounds) const
+		{
+			return get_bounds(bounds).overlaps(other.get_bounds(bounds));
+		}
+
+		inline bool inside(const address_range &other, section_bounds bounds) const
+		{
+			return get_bounds(bounds).inside(other);
+		}
+
+		inline bool inside(const address_range_vector &other, section_bounds bounds) const
+		{
+			return get_bounds(bounds).inside(other);
+		}
+
+		inline bool inside(const buffered_section &other, section_bounds bounds) const
+		{
+			return get_bounds(bounds).inside(other.get_bounds(bounds));
+		}
+
+		inline s32 signed_distance(const address_range &other, section_bounds bounds) const
+		{
+			return get_bounds(bounds).signed_distance(other);
+		}
+
+		inline u32 distance(const address_range &other, section_bounds bounds) const
+		{
+			return get_bounds(bounds).distance(other);
+		}
+
+		/**
+		* Utilities
+		*/
+		inline bool valid_range() const
+		{
+			return cpu_range.valid();
+		}
+
+		inline bool is_locked() const
 		{
 			return locked;
 		}
 
-		bool is_dirty() const
+		inline u32 get_section_base() const
 		{
-			return dirty;
+			return cpu_range.start;
 		}
 
-		void set_dirty(bool state)
+		inline u32 get_section_size() const
 		{
-			dirty = state;
+			return cpu_range.valid() ? cpu_range.length() : 0;
 		}
 
-		u32 get_section_base() const
+		inline const address_range& get_locked_range() const
 		{
-			return cpu_address_base;
+			AUDIT( locked );
+			return locked_range;
 		}
 
-		u32 get_section_size() const
+		inline const address_range& get_section_range() const
 		{
-			return cpu_address_range;
+			return cpu_range;
 		}
 
-		bool matches(u32 cpu_address, u32 size) const
+		const address_range& get_confirmed_range() const
 		{
-			return (cpu_address_base == cpu_address && cpu_address_range == size);
+			return confirmed_range.valid() ? confirmed_range : cpu_range;
 		}
 
-		std::pair<u32, u32> get_min_max(std::pair<u32, u32> current_min_max) const
+		const std::pair<u32, u32> get_confirmed_range_delta() const
 		{
-			u32 min = std::min(current_min_max.first, locked_address_base);
-			u32 max = std::max(current_min_max.second, locked_address_base + locked_address_range);
+			if (!confirmed_range.valid())
+				return { 0, cpu_range.length() };
 
-			return std::make_pair(min, max);
+			return { confirmed_range.start - cpu_range.start, confirmed_range.length() };
 		}
 
-		utils::protection get_protection() const
+		inline bool matches(const address_range &range) const
+		{
+			return cpu_range.valid() && cpu_range == range;
+		}
+
+		inline utils::protection get_protection() const
 		{
 			return protection;
 		}
+
+		inline address_range get_min_max(const address_range& current_min_max, section_bounds bounds) const
+		{
+			return get_bounds(bounds).get_min_max(current_min_max);
+		}
+
+		/**
+		 * Super Pointer
+		 */
+		template <typename T = void>
+		inline T* get_ptr(u32 address) const
+		{
+			return reinterpret_cast<T*>(vm::g_sudo_addr + address);
+		}
+
+		/**
+		 * Memory tagging
+		 */
+	private:
+		inline void tag_memory()
+		{
+			// We only need to tag memory if we are in full-range mode
+			if (guard_policy == protect_policy_full_range)
+				return;
+
+			AUDIT(locked);
+
+			const address_range& range = get_confirmed_range();
+
+			volatile u32* first = get_ptr<volatile u32>(range.start);
+			volatile u32* last = get_ptr<volatile u32>(range.end - 3);
+
+			*first = range.start;
+			*last = range.end;
+		}
+
+	public:
+		bool test_memory_head()
+		{
+			if (guard_policy == protect_policy_full_range)
+				return true;
+
+			AUDIT(locked);
+
+			const auto& range = get_confirmed_range();
+			volatile const u32* first = get_ptr<volatile const u32>(range.start);
+			return (*first == range.start);
+		}
+
+		bool test_memory_tail()
+		{
+			if (guard_policy == protect_policy_full_range)
+				return true;
+
+			AUDIT(locked);
+
+			const auto& range = get_confirmed_range();
+			volatile const u32* last = get_ptr<volatile const u32>(range.end-3);
+			return (*last == range.end);
+		}
 	};
+
+
 
 	template <typename pipeline_storage_type, typename backend_storage>
 	class shaders_cache
@@ -257,6 +390,12 @@ namespace rsx
 			u64 pipeline_storage_hash;
 
 			u32 vp_ctrl;
+			u32 vp_texture_dimensions;
+			u64 vp_instruction_mask[8];
+
+			u32 vp_base_address;
+			u32 vp_entry;
+			u16 vp_jump_table[32];
 
 			u32 fp_ctrl;
 			u32 fp_texture_dimensions;
@@ -284,14 +423,15 @@ namespace rsx
 		struct progress_dialog_helper
 		{
 			std::shared_ptr<MsgDialogBase> dlg;
-			atomic_t<bool> initialized{ false };
+			atomic_t<int> ref_cnt;
 
 			virtual void create()
 			{
 				dlg = Emu.GetCallbacks().get_msg_dialog();
 				dlg->type.se_normal = true;
 				dlg->type.bg_invisible = true;
-				dlg->type.progress_bar_count = 1;
+				dlg->type.progress_bar_count = 2;
+				dlg->ProgressBarSetTaskbarIndex(-1); // -1 to combine all progressbars in the taskbar progress
 				dlg->on_close = [](s32 status)
 				{
 					Emu.CallAfter([]()
@@ -300,36 +440,64 @@ namespace rsx
 					});
 				};
 
+				ref_cnt++;
+
 				Emu.CallAfter([&]()
 				{
-					dlg->Create("Preloading cached shaders from disk.\nPlease wait...");
-					initialized.store(true);
+					dlg->Create("Preloading cached shaders from disk.\nPlease wait...", "Shader Compilation");
+					ref_cnt--;
 				});
 
-				while (!initialized.load() && !Emu.IsStopped())
+				while (ref_cnt.load() && !Emu.IsStopped())
 				{
 					_mm_pause();
 				}
 			}
 
-			virtual void update_msg(u32 processed, u32 entry_count)
+			virtual void update_msg(u32 index, u32 processed, u32 entry_count)
 			{
-				Emu.CallAfter([=]()
+				ref_cnt++;
+
+				Emu.CallAfter([&, index, processed, entry_count]()
 				{
-					dlg->ProgressBarSetMsg(0, fmt::format("Loading pipeline object %u of %u", processed, entry_count));
+					const char *text = index == 0 ? "Loading pipeline object %u of %u" : "Compiling pipeline object %u of %u";
+					dlg->ProgressBarSetMsg(index, fmt::format(text, processed, entry_count));
+					ref_cnt--;
 				});
 			}
 
-			virtual void inc_value(u32 value)
+			virtual void inc_value(u32 index, u32 value)
 			{
-				Emu.CallAfter([=]()
+				ref_cnt++;
+
+				Emu.CallAfter([&, index, value]()
 				{
-					dlg->ProgressBarInc(0, value);
+					dlg->ProgressBarInc(index, value);
+					ref_cnt--;
 				});
 			}
+
+			virtual void set_limit(u32 index, u32 limit)
+			{
+				ref_cnt++;
+
+				Emu.CallAfter([&, index, limit]()
+				{
+					dlg->ProgressBarSetLimit(index, limit);
+					ref_cnt--;
+				});
+			}
+
+			virtual void refresh()
+			{};
 
 			virtual void close()
-			{}
+			{
+				while (ref_cnt.load() && !Emu.IsStopped())
+				{
+					_mm_pause();
+				}
+			}
 		};
 
 		shaders_cache(backend_storage& storage, std::string pipeline_class, std::string version_prefix_str = "v1")
@@ -337,7 +505,10 @@ namespace rsx
 			, pipeline_class_name(pipeline_class)
 			, m_storage(storage)
 		{
-			root_path = Emu.GetCachePath() + "/shaders_cache";
+			if (!g_cfg.video.disable_on_disk_shader_cache)
+			{
+				root_path = Emu.PPUCache() + "shaders_cache";
+			}
 		}
 
 		template <typename... Args>
@@ -348,7 +519,7 @@ namespace rsx
 				return;
 			}
 
-			std::string directory_path = root_path + "/pipelines/" + pipeline_class_name;
+			std::string directory_path = root_path + "/pipelines/" + pipeline_class_name + "/" + version_prefix;
 
 			if (!fs::is_dir(directory_path))
 			{
@@ -359,19 +530,26 @@ namespace rsx
 			}
 
 			fs::dir root = fs::dir(directory_path);
-			fs::dir_entry tmp;
 
 			u32 entry_count = 0;
-			for (auto It = root.begin(); It != root.end(); ++It, entry_count++);
+			std::vector<fs::dir_entry> entries;
+			for (auto It = root.begin(); It != root.end(); ++It, entry_count++)
+			{
+				fs::dir_entry tmp = *It;
 
-			if (entry_count <= 2)
+				if (tmp.name == "." || tmp.name == "..")
+					continue;
+
+				entries.push_back(tmp);
+			}
+
+			if ((entry_count = (u32)entries.size()) <= 2)
 				return;
 
-			entry_count -= 2;
-			f32 delta = 100.f / entry_count;
-			f32 tally = 0.f;
-
 			root.rewind();
+
+			// Invalid pipeline entries to be removed
+			std::vector<std::string> invalid_entries;
 
 			// Progress dialog
 			std::unique_ptr<progress_dialog_helper> fallback_dlg;
@@ -382,43 +560,126 @@ namespace rsx
 			}
 
 			dlg->create();
+			dlg->set_limit(0, entry_count);
+			dlg->set_limit(1, entry_count);
+			dlg->update_msg(0, 0, entry_count);
+			dlg->update_msg(1, 0, entry_count);
 
-			const auto prefix_length = version_prefix.length();
-			u32 processed = 0;
-			while (root.read(tmp) && !Emu.IsStopped())
+			// Setup worker threads
+			unsigned nb_threads = std::thread::hardware_concurrency();
+			std::vector<std::thread> worker_threads(nb_threads);
+
+			// Preload everything needed to compile the shaders
+			// Can probably be parallelized too, but since it's mostly reading files it's probably not worth it
+			std::vector<std::tuple<pipeline_storage_type, RSXVertexProgram, RSXFragmentProgram>> unpackeds;
+			std::chrono::time_point<steady_clock> last_update;
+			u32 processed_since_last_update = 0;
+
+			for (u32 i = 0; (i < entry_count) && !Emu.IsStopped(); i++)
 			{
-				if (tmp.name == "." || tmp.name == "..")
-					continue;
+				fs::dir_entry tmp = entries[i];
 
-				if (tmp.name.compare(0, prefix_length, version_prefix) != 0)
-					continue;
-
+				const auto filename = directory_path + "/" + tmp.name;
 				std::vector<u8> bytes;
-				fs::file f(directory_path + "/" + tmp.name);
-
-				processed++;
-				dlg->update_msg(processed, entry_count);
-
+				fs::file f(filename);
 				if (f.size() != sizeof(pipeline_data))
 				{
 					LOG_ERROR(RSX, "Cached pipeline object %s is not binary compatible with the current shader cache", tmp.name.c_str());
+					invalid_entries.push_back(filename);
 					continue;
 				}
-
 				f.read<u8>(bytes, f.size());
+
 				auto unpacked = unpack(*(pipeline_data*)bytes.data());
-				m_storage.add_pipeline_entry(std::get<1>(unpacked), std::get<2>(unpacked), std::get<0>(unpacked), std::forward<Args>(args)...);
+				m_storage.preload_programs(std::get<1>(unpacked), std::get<2>(unpacked));
+				unpackeds.push_back(unpacked);
 
-				tally += delta;
-				if (tally > 1.f)
+				// Only update the screen at about 10fps since updating it everytime slows down the process
+				std::chrono::time_point<steady_clock> now = std::chrono::steady_clock::now();
+				processed_since_last_update++;
+				if ((std::chrono::duration_cast<std::chrono::milliseconds>(now - last_update) > 100ms) || (i == entry_count - 1))
 				{
-					u32 value = (u32)tally;
-					dlg->inc_value(value);
-
-					tally -= (f32)value;
+					dlg->update_msg(0, i + 1, entry_count);
+					dlg->inc_value(0, processed_since_last_update);
+					last_update = now;
+					processed_since_last_update = 0;
 				}
 			}
 
+			atomic_t<u32> processed(0);
+			std::function<void(u32)> shader_comp_worker = [&](u32 index)
+			{
+				u32 pos;
+				while (((pos = processed++) < entry_count) && !Emu.IsStopped())
+				{
+					auto unpacked = unpackeds[pos];
+					m_storage.add_pipeline_entry(std::get<1>(unpacked), std::get<2>(unpacked), std::get<0>(unpacked), std::forward<Args>(args)...);
+				}
+			};
+
+			if (g_cfg.video.renderer == video_renderer::vulkan)
+			{
+				// Start workers
+				for (u32 i = 0; i < nb_threads; i++)
+				{
+					worker_threads[i] = std::thread(shader_comp_worker, i);
+				}
+
+				// Wait for the workers to finish their task while updating UI
+				u32 current_progress = 0;
+				u32 last_update_progress = 0;
+
+				while ((current_progress < entry_count) && !Emu.IsStopped())
+				{
+					std::this_thread::sleep_for(100ms); // Around 10fps should be good enough
+
+					current_progress = std::min(processed.load(), entry_count);
+					processed_since_last_update = current_progress - last_update_progress;
+					last_update_progress = current_progress;
+
+					if (processed_since_last_update > 0)
+					{
+						dlg->update_msg(1, current_progress, entry_count);
+						dlg->inc_value(1, processed_since_last_update);
+					}
+				}
+
+				// Need to join the threads to be absolutely sure shader compilation is done.
+				for (std::thread& worker_thread : worker_threads)
+					worker_thread.join();
+			}
+			else
+			{
+				u32 pos;
+				while (((pos = processed++) < entry_count) && !Emu.IsStopped())
+				{
+					auto unpacked = unpackeds[pos];
+					m_storage.add_pipeline_entry(std::get<1>(unpacked), std::get<2>(unpacked), std::get<0>(unpacked), std::forward<Args>(args)...);
+
+					// Update screen at about 10fps
+					std::chrono::time_point<steady_clock> now = std::chrono::steady_clock::now();
+					processed_since_last_update++;
+					if ((std::chrono::duration_cast<std::chrono::milliseconds>(now - last_update) > 100ms) || (pos == entry_count - 1))
+					{
+						dlg->update_msg(1, pos + 1, entry_count);
+						dlg->inc_value(1, processed_since_last_update);
+						last_update = now;
+						processed_since_last_update = 0;
+					}
+				}
+			}
+
+			if (!invalid_entries.empty())
+			{
+				for (const auto &filename : invalid_entries)
+				{
+					fs::remove_file(filename);
+				}
+
+				LOG_NOTICE(RSX, "shader cache: %d entries were marked as invalid and removed", invalid_entries.size());
+			}
+
+			dlg->refresh();
 			dlg->close();
 		}
 
@@ -429,14 +690,19 @@ namespace rsx
 				return;
 			}
 
+			if (vp.jump_table.size() > 32)
+			{
+				LOG_ERROR(RSX, "shaders_cache: vertex program has more than 32 jump addresses. Entry not saved to cache");
+				return;
+			}
+
 			pipeline_data data = pack(pipeline, vp, fp);
 			std::string fp_name = root_path + "/raw/" + fmt::format("%llX.fp", data.fragment_program_hash);
 			std::string vp_name = root_path + "/raw/" + fmt::format("%llX.vp", data.vertex_program_hash);
 
 			if (!fs::is_file(fp_name))
 			{
-				const auto size = program_hash_util::fragment_program_utils::get_fragment_program_ucode_size(fp.addr);
-				fs::file(fp_name, fs::rewrite).write(fp.addr, size);
+				fs::file(fp_name, fs::rewrite).write(fp.addr, fp.ucode_length);
 			}
 
 			if (!fs::is_file(vp_name))
@@ -447,6 +713,7 @@ namespace rsx
 			u64 state_hash = 0;
 			state_hash ^= rpcs3::hash_base<u32>(data.vp_ctrl);
 			state_hash ^= rpcs3::hash_base<u32>(data.fp_ctrl);
+			state_hash ^= rpcs3::hash_base<u32>(data.vp_texture_dimensions);
 			state_hash ^= rpcs3::hash_base<u32>(data.fp_texture_dimensions);
 			state_hash ^= rpcs3::hash_base<u16>(data.fp_unnormalized_coords);
 			state_hash ^= rpcs3::hash_base<u16>(data.fp_height);
@@ -458,7 +725,7 @@ namespace rsx
 			state_hash ^= rpcs3::hash_base<u64>(data.fp_zfunc_mask);
 
 			std::string pipeline_file_name = fmt::format("%llX+%llX+%llX+%llX.bin", data.vertex_program_hash, data.fragment_program_hash, data.pipeline_storage_hash, state_hash);
-			std::string pipeline_path = root_path + "/pipelines/" + pipeline_class_name + "/" + version_prefix + "-" + pipeline_file_name;
+			std::string pipeline_path = root_path + "/pipelines/" + pipeline_class_name + "/" + version_prefix + "/" + pipeline_file_name;
 			fs::file(pipeline_path, fs::rewrite).write(&data, sizeof(pipeline_data));
 		}
 
@@ -488,6 +755,7 @@ namespace rsx
 			RSXFragmentProgram fp = {};
 			fragment_program_data[program_hash] = data;
 			fp.addr = fragment_program_data[program_hash].data();
+			fp.ucode_length = (u32)data.size();
 
 			return fp;
 		}
@@ -499,6 +767,23 @@ namespace rsx
 			pipeline_storage_type pipeline = data.pipeline_properties;
 
 			vp.output_mask = data.vp_ctrl;
+			vp.texture_dimensions = data.vp_texture_dimensions;
+			vp.base_address = data.vp_base_address;
+			vp.entry = data.vp_entry;
+
+			pack_bitset<512>(vp.instruction_mask, data.vp_instruction_mask);
+
+			for (u8 index = 0; index < 32; ++index)
+			{
+				const auto address = data.vp_jump_table[index];
+				if (address == UINT16_MAX)
+				{
+					// End of list marker
+					break;
+				}
+
+				vp.jump_table.emplace(address);
+			}
 
 			fp.ctrl = data.fp_ctrl;
 			fp.texture_dimensions = data.fp_texture_dimensions;
@@ -529,6 +814,29 @@ namespace rsx
 			data_block.pipeline_storage_hash = m_storage.get_hash(pipeline);
 
 			data_block.vp_ctrl = vp.output_mask;
+			data_block.vp_texture_dimensions = vp.texture_dimensions;
+			data_block.vp_base_address = vp.base_address;
+			data_block.vp_entry = vp.entry;
+
+			unpack_bitset<512>(vp.instruction_mask, data_block.vp_instruction_mask);
+
+			u8 index = 0;
+			while (index < 32)
+			{
+				if (!index && !vp.jump_table.empty())
+				{
+					for (auto &address : vp.jump_table)
+					{
+						data_block.vp_jump_table[index++] = (u16)address;
+					}
+				}
+				else
+				{
+					// End of list marker
+					data_block.vp_jump_table[index] = UINT16_MAX;
+					break;
+				}
+			}
 
 			data_block.fp_ctrl = fp.ctrl;
 			data_block.fp_texture_dimensions = fp.texture_dimensions;
@@ -555,6 +863,7 @@ namespace rsx
 		class default_vertex_cache
 		{
 		public:
+			virtual ~default_vertex_cache() {};
 			virtual storage_type* find_vertex_range(uintptr_t /*local_addr*/, upload_format, u32 /*data_length*/) { return nullptr; }
 			virtual void store_range(uintptr_t /*local_addr*/, upload_format, u32 /*data_length*/, u32 /*offset_in_heap*/) {}
 			virtual void purge() {}
@@ -584,8 +893,11 @@ namespace rsx
 
 			storage_type* find_vertex_range(uintptr_t local_addr, upload_format fmt, u32 data_length) override
 			{
+				const auto data_end = local_addr + data_length;
+
 				for (auto &v : vertex_ranges[local_addr])
 				{
+					// NOTE: This has to match exactly. Using sized shortcuts such as >= comparison causes artifacting in some applications (UC1)
 					if (v.buffer_format == fmt && v.data_length == data_length)
 						return &v;
 				}

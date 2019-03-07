@@ -1,7 +1,7 @@
 #pragma once
 
 #include "D3D12Utils.h"
-#include "Emu/Memory/Memory.h"
+#include "Emu/Memory/vm.h"
 #include "Emu/System.h"
 #include "Emu/RSX/GSRender.h"
 
@@ -121,6 +121,7 @@ private:
 	ComPtr<ID3D12DescriptorHeap> m_current_sampler_descriptors;
 
 public:
+	u64 get_cycles() override final;
 	D3D12GSRender();
 	virtual ~D3D12GSRender();
 
@@ -173,7 +174,7 @@ private:
 protected:
 	virtual void on_init_thread() override;
 	virtual void on_exit() override;
-	virtual void do_local_task(bool idle) override;
+	virtual void do_local_task(rsx::FIFO_state state) override;
 	virtual bool do_method(u32 cmd, u32 arg) override;
 	virtual void end() override;
 	virtual void flip(int buffer) override;

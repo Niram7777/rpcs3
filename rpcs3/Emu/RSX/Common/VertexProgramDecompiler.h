@@ -1,7 +1,8 @@
-#pragma once
+﻿#pragma once
 #include "Emu/RSX/RSXVertexProgram.h"
 #include <vector>
 #include <set>
+#include <stack>
 #include <sstream>
 #include "ShaderParam.h"
 
@@ -12,7 +13,7 @@
 * - virtual std::string getFunction(enum class FUNCTION) = 0;
 * - virtual std::string compareFunction(enum class COMPARE, const std::string &, const std::string &) = 0;
 * - virtual void insertHeader(std::stringstream &OS) = 0;
-* - virtual void insertIntputs(std::stringstream &OS) = 0;
+* - virtual void insertInputs(std::stringstream &OS) = 0;
 * - virtual void insertOutputs(std::stringstream &OS) = 0;
 * - virtual void insertConstants(std::stringstream &OS) = 0;
 * - virtual void insertMainStart(std::stringstream &OS) = 0;
@@ -25,6 +26,13 @@ struct VertexProgramDecompiler
 	D2 d2;
 	D3 d3;
 	SRC src[3];
+
+	enum
+	{
+		lt = 0x1,
+		eq = 0x2,
+		gt = 0x4,
+	};
 
 	struct FuncInfo
 	{
@@ -52,13 +60,10 @@ struct VertexProgramDecompiler
 	Instruction* m_cur_instr;
 	size_t m_instr_count;
 
-	std::set<int> m_jump_lvls;
 	std::vector<std::string> m_body;
-	std::vector<FuncInfo> m_funcs;
+	std::stack<u32> m_call_stack;
 
-	//wxString main;
-
-	const std::vector<u32>& m_data;
+	const RSXVertexProgram& m_prog;
 	ParamArray m_parr;
 
 	std::string NotZeroPositive(const std::string& code);
@@ -67,13 +72,12 @@ struct VertexProgramDecompiler
 	std::string GetScaMask();
 	std::string GetDST(bool is_sca = false);
 	std::string GetSRC(const u32 n);
-	std::string GetFunc();
 	std::string GetTex();
+	std::string GetRawCond();
 	std::string GetCond();
 	std::string GetOptionalBranchCond();	//Conditional branch expression modified externally at runtime
-	std::string AddAddrMask();
 	std::string AddAddrReg();
-	std::string AddAddrRegWithoutMask();
+	std::string AddCondReg();
 	u32 GetAddr();
 	std::string Format(const std::string& code);
 
@@ -82,7 +86,6 @@ struct VertexProgramDecompiler
 	void SetDST(bool is_sca, std::string value);
 	void SetDSTVec(const std::string& code);
 	void SetDSTSca(const std::string& code);
-	std::string BuildFuncBody(const FuncInfo& func);
 	std::string BuildCode();
 
 protected:
@@ -101,7 +104,7 @@ protected:
 
 	/** returns string calling comparison function on 2 args passed as strings.
 	*/
-	virtual std::string compareFunction(COMPARE, const std::string &, const std::string &) = 0;
+	virtual std::string compareFunction(COMPARE, const std::string &, const std::string &, bool scalar = false) = 0;
 
 	/** Insert header of shader file (eg #version, "system constants"...)
 	*/

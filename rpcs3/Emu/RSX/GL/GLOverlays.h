@@ -1,8 +1,8 @@
-#pragma once
+﻿#pragma once
 
 #include "stdafx.h"
 #include "GLHelpers.h"
-#include "../overlays.h"
+#include "../Overlays/overlays.h"
 
 extern u64 get_system_time();
 
@@ -18,6 +18,7 @@ namespace gl
 		gl::glsl::shader fs;
 
 		gl::fbo fbo;
+		gl::sampler_state m_sampler;
 
 		gl::vao m_vao;
 		gl::buffer m_vertex_data_buffer;
@@ -26,6 +27,29 @@ namespace gl
 
 		u32 num_drawable_elements = 4;
 		GLenum primitives = GL_TRIANGLE_STRIP;
+		GLenum input_filter = GL_NEAREST;
+
+		struct saved_sampler_state
+		{
+			GLuint saved = GL_NONE;
+			GLuint unit = 0;
+
+			saved_sampler_state(GLuint _unit, const gl::sampler_state& sampler)
+			{
+				glActiveTexture(GL_TEXTURE0 + _unit);
+				glGetIntegerv(GL_SAMPLER_BINDING, (GLint*)&saved);
+
+				unit = _unit;
+				sampler.bind(_unit);
+			}
+
+			saved_sampler_state(const saved_sampler_state&) = delete;
+
+			~saved_sampler_state()
+			{
+				glBindSampler(unit, saved);
+			}
+		};
 
 		void create()
 		{
@@ -45,6 +69,9 @@ namespace gl
 				program_handle.make();
 
 				fbo.create();
+
+				m_sampler.create();
+				m_sampler.apply_defaults(input_filter);
 
 				m_vertex_data_buffer.create();
 
@@ -75,6 +102,8 @@ namespace gl
 				fbo.remove();
 				m_vao.remove();
 				m_vertex_data_buffer.remove();
+
+				m_sampler.remove();
 
 				compiled = false;
 			}
@@ -250,6 +279,7 @@ namespace gl
 			vs_src =
 			{
 				"#version 420\n\n"
+				"uniform vec2 tex_scale;\n"
 				"out vec2 tc0;\n"
 				"\n"
 				"void main()\n"
@@ -257,7 +287,7 @@ namespace gl
 				"	vec2 positions[] = {vec2(-1., -1.), vec2(1., -1.), vec2(-1., 1.), vec2(1., 1.)};\n"
 				"	vec2 coords[] = {vec2(0., 0.), vec2(1., 0.), vec2(0., 1.), vec2(1., 1.)};\n"
 				"	gl_Position = vec4(positions[gl_VertexID % 4], 0., 1.);\n"
-				"	tc0 = coords[gl_VertexID % 4];\n"
+				"	tc0 = coords[gl_VertexID % 4] * tex_scale;\n"
 				"}\n"
 			};
 
@@ -275,12 +305,17 @@ namespace gl
 			};
 		}
 
-		void run(u16 w, u16 h, GLuint target, GLuint source)
+		void run(const areai& src_area, const areai& dst_area, gl::texture* source, gl::texture* target)
 		{
-			glActiveTexture(GL_TEXTURE31);
-			glBindTexture(GL_TEXTURE_2D, source);
+			const auto src_ratio_x = f32(src_area.x2) / source->width();
+			const auto src_ratio_y = f32(src_area.y2) / source->height();
 
-			overlay_pass::run(w, h, target, true);
+			program_handle.uniforms["tex_scale"] = color2f(src_ratio_x, src_ratio_y);
+
+			saved_sampler_state saved(31, m_sampler);
+			glBindTexture(GL_TEXTURE_2D, source->id());
+
+			overlay_pass::run(dst_area.x2, dst_area.y2, target->id(), true);
 		}
 	};
 
@@ -316,7 +351,7 @@ namespace gl
 
 		void run(u16 w, u16 h, GLuint target, GLuint source)
 		{
-			glActiveTexture(GL_TEXTURE31);
+			saved_sampler_state saved(31, m_sampler);
 			glBindTexture(GL_TEXTURE_2D, source);
 
 			overlay_pass::run(w, h, target, false);
@@ -327,8 +362,10 @@ namespace gl
 	{
 		u32 num_elements = 0;
 		std::vector<std::unique_ptr<gl::texture>> resources;
-		std::unordered_map<u64, std::unique_ptr<gl::texture>> temp_image_cache;
+		std::unordered_map<u64, std::pair<u32, std::unique_ptr<gl::texture>>> temp_image_cache;
+		std::unordered_map<u64, std::unique_ptr<gl::texture_view>> temp_view_cache;
 		std::unordered_map<u64, std::unique_ptr<gl::texture>> font_cache;
+		std::unordered_map<u64, std::unique_ptr<gl::texture_view>> view_cache;
 		bool is_font_draw = false;
 
 		ui_overlay_renderer()
@@ -338,17 +375,26 @@ namespace gl
 				"#version 420\n\n"
 				"layout(location=0) in vec4 in_pos;\n"
 				"layout(location=0) out vec2 tc0;\n"
-				"layout(location=1) out vec4 clip_rect;\n"
+				"layout(location=1) flat out vec4 clip_rect;\n"
 				"uniform vec4 ui_scale;\n"
+				"uniform vec2 viewport;\n"
 				"uniform vec4 clip_bounds;\n"
+				"\n"
+				"vec2 snap_to_grid(vec2 normalized)\n"
+				"{\n"
+				"	return (floor(normalized * viewport) + 0.5) / viewport;\n"
+				"}\n"
 				"\n"
 				"void main()\n"
 				"{\n"
 				"	tc0.xy = in_pos.zw;\n"
-				"	clip_rect = (clip_bounds * ui_scale.zwzw);\n"
-				"	clip_rect.yw = ui_scale.yy - clip_rect.wy; //invert y axis\n"
-				"	vec4 pos = vec4((in_pos.xy * ui_scale.zw) / ui_scale.xy, 0., 1.);\n"
-				"	pos.y = (1. - pos.y); //invert y axis\n"
+				"	clip_rect = clip_bounds;\n"
+				"	clip_rect.yw = ui_scale.yy - clip_rect.wy; // Invert y axis\n"
+				"	clip_rect *= (ui_scale.zwzw * viewport.xyxy) / ui_scale.xyxy; // Normalize and convert to window coords\n"
+				"	vec2 window_coord = (in_pos.xy * ui_scale.zw) / ui_scale.xy;\n"
+				"	window_coord = snap_to_grid(window_coord); // Half-integer offset\n"
+				"	window_coord.y = (1. - window_coord.y); // Invert y axis\n"
+				"	vec4 pos = vec4(window_coord, 0., 1.);\n"
 				"	gl_Position = (pos + pos) - 1.;\n"
 				"}\n"
 			};
@@ -358,13 +404,63 @@ namespace gl
 				"#version 420\n\n"
 				"layout(binding=31) uniform sampler2D fs0;\n"
 				"layout(location=0) in vec2 tc0;\n"
-				"layout(location=1) in vec4 clip_rect;\n"
+				"layout(location=1) flat in vec4 clip_rect;\n"
 				"layout(location=0) out vec4 ocol;\n"
 				"uniform vec4 color;\n"
 				"uniform float time;\n"
 				"uniform int read_texture;\n"
 				"uniform int pulse_glow;\n"
 				"uniform int clip_region;\n"
+				"uniform int blur_strength;\n"
+				"\n"
+				"vec4 blur_sample(sampler2D tex, vec2 coord, vec2 tex_offset)\n"
+				"{\n"
+				"	vec2 coords[9];\n"
+				"	coords[0] = coord - tex_offset\n;"
+				"	coords[1] = coord + vec2(0., -tex_offset.y);\n"
+				"	coords[2] = coord + vec2(tex_offset.x, -tex_offset.y);\n"
+				"	coords[3] = coord + vec2(-tex_offset.x, 0.);\n"
+				"	coords[4] = coord;\n"
+				"	coords[5] = coord + vec2(tex_offset.x, 0.);\n"
+				"	coords[6] = coord + vec2(-tex_offset.x, tex_offset.y);\n"
+				"	coords[7] = coord + vec2(0., tex_offset.y);\n"
+				"	coords[8] = coord + tex_offset;\n"
+				"\n"
+				"	float weights[9] =\n"
+				"	{\n"
+				"		1., 2., 1.,\n"
+				"		2., 4., 2.,\n"
+				"		1., 2., 1.\n"
+				"	};\n"
+				"\n"
+				"	vec4 blurred = vec4(0.);\n"
+				"	for (int n = 0; n < 9; ++n)\n"
+				"	{\n"
+				"		blurred += texture(tex, coords[n]) * weights[n];\n"
+				"	}\n"
+				"\n"
+				"	return blurred / 16.f;\n"
+				"}\n"
+				"\n"
+				"vec4 sample_image(sampler2D tex, vec2 coord)\n"
+				"{\n"
+				"	vec4 original = texture(tex, coord);\n"
+				"	if (blur_strength == 0) return original;\n"
+				"	\n"
+				"	vec2 constraints = 1.f / vec2(640, 360);\n"
+				"	vec2 res_offset = 1.f / textureSize(fs0, 0);\n"
+				"	vec2 tex_offset = max(res_offset, constraints);\n"
+				"\n"
+				"	// Sample triangle pattern and average\n"
+				"	// TODO: Nicer looking gaussian blur with less sampling\n"
+				"	vec4 blur0 = blur_sample(tex, coord + vec2(-res_offset.x, 0.), tex_offset);\n"
+				"	vec4 blur1 = blur_sample(tex, coord + vec2(res_offset.x, 0.), tex_offset);\n"
+				"	vec4 blur2 = blur_sample(tex, coord + vec2(0., res_offset.y), tex_offset);\n"
+				"\n"
+				"	vec4 blurred = blur0 + blur1 + blur2;\n"
+				"	blurred /= 3.;\n"
+				"	return mix(original, blurred, float(blur_strength) / 100.);\n"
+				"}\n"
 				"\n"
 				"void main()\n"
 				"{\n"
@@ -383,38 +479,38 @@ namespace gl
 				"		diff_color.a *= (sin(time) + 1.f) * 0.5f;\n"
 				"\n"
 				"	if (read_texture != 0)\n"
-				"		ocol = texture(fs0, tc0) * diff_color;\n"
+				"		ocol = sample_image(fs0, tc0) * diff_color;\n"
 				"	else\n"
 				"		ocol = diff_color;\n"
 				"}\n"
 			};
+
+			// Smooth filtering required for inputs
+			input_filter = GL_LINEAR;
 		}
 
-		gl::texture* load_simple_image(rsx::overlays::image_info* desc, bool temp_resource)
+		gl::texture_view* load_simple_image(rsx::overlays::image_info* desc, bool temp_resource, u32 owner_uid)
 		{
-			auto tex = std::make_unique<gl::texture>(gl::texture::target::texture2D);
-			tex->create();
-			tex->config()
-				.size({ desc->w, desc->h })
-				.format(gl::texture::format::rgba)
-				.type(gl::texture::type::uint_8_8_8_8)
-				.wrap(gl::texture::wrap::clamp_to_border, gl::texture::wrap::clamp_to_border, gl::texture::wrap::clamp_to_border)
-				.swizzle(gl::texture::channel::a, gl::texture::channel::b, gl::texture::channel::g, gl::texture::channel::r)
-				.filter(gl::min_filter::linear, gl::filter::linear)
-				.apply();
+			auto tex = std::make_unique<gl::texture>(GL_TEXTURE_2D, desc->w, desc->h, 1, 1, GL_RGBA8);
 			tex->copy_from(desc->data, gl::texture::format::rgba, gl::texture::type::uint_8_8_8_8);
 
+			GLenum remap[] = { GL_RED, GL_ALPHA, GL_BLUE, GL_GREEN };
+			auto view = std::make_unique<gl::texture_view>(tex.get(), remap);
+
+			auto result = view.get();
 			if (!temp_resource)
 			{
 				resources.push_back(std::move(tex));
+				view_cache[view_cache.size()] = std::move(view);
 			}
 			else
 			{
 				u64 key = (u64)desc;
-				temp_image_cache[key] = std::move(tex);
+				temp_image_cache[key] = std::move(std::make_pair(owner_uid, std::move(tex)));
+				temp_view_cache[key] = std::move(view);
 			}
 
-			return resources.back().get();
+			return result;
 		}
 
 		void create()
@@ -426,7 +522,7 @@ namespace gl
 
 			for (const auto &res : configuration.texture_raw_data)
 			{
-				load_simple_image(res.get(), false);
+				load_simple_image(res.get(), false, UINT32_MAX);
 			}
 
 			configuration.free_resources();
@@ -440,49 +536,56 @@ namespace gl
 			overlay_pass::destroy();
 		}
 
-		void remove_temp_resources()
+		void remove_temp_resources(u64 key)
 		{
-			temp_image_cache.clear();
+			std::vector<u64> keys_to_remove;
+			for (auto It = temp_image_cache.begin(); It != temp_image_cache.end(); ++It)
+			{
+				if (It->second.first == key)
+				{
+					keys_to_remove.push_back(It->first);
+				}
+			}
+
+			for (const auto& _key : keys_to_remove)
+			{
+				temp_image_cache.erase(_key);
+				temp_view_cache.erase(_key);
+			}
 		}
 
-		gl::texture* find_font(rsx::overlays::font *font)
+		gl::texture_view* find_font(rsx::overlays::font *font)
 		{
 			u64 key = (u64)font;
-			auto found = font_cache.find(key);
-			if (found != font_cache.end())
+			auto found = view_cache.find(key);
+			if (found != view_cache.end())
 				return found->second.get();
 
 			//Create font file
-			auto tex = std::make_unique<gl::texture>(gl::texture::target::texture2D);
-			tex->create();
-			tex->config()
-				.size({ (int)font->width, (int)font->height })
-				.format(gl::texture::format::r)
-				.type(gl::texture::type::ubyte)
-				.internal_format(gl::texture::internal_format::r8)
-				.wrap(gl::texture::wrap::clamp_to_border, gl::texture::wrap::clamp_to_border, gl::texture::wrap::clamp_to_border)
-				.swizzle(gl::texture::channel::r, gl::texture::channel::r, gl::texture::channel::r, gl::texture::channel::r)
-				.filter(gl::min_filter::linear, gl::filter::linear)
-				.apply();
+			auto tex = std::make_unique<gl::texture>(GL_TEXTURE_2D, (int)font->width, (int)font->height, 1, 1, GL_R8);
 			tex->copy_from(font->glyph_data.data(), gl::texture::format::r, gl::texture::type::ubyte);
 
-			auto result = tex.get();
+			GLenum remap[] = { GL_RED, GL_RED, GL_RED, GL_RED };
+			auto view = std::make_unique<gl::texture_view>(tex.get(), remap);
+
+			auto result = view.get();
 			font_cache[key] = std::move(tex);
+			view_cache[key] = std::move(view);
 
 			return result;
 		}
 
-		gl::texture* find_temp_image(rsx::overlays::image_info *desc)
+		gl::texture_view* find_temp_image(rsx::overlays::image_info *desc, u32 owner_uid)
 		{
 			auto key = (u64)desc;
-			auto cached = temp_image_cache.find(key);
-			if (cached != temp_image_cache.end())
+			auto cached = temp_view_cache.find(key);
+			if (cached != temp_view_cache.end())
 			{
 				return cached->second.get();
 			}
 			else
 			{
-				return load_simple_image(desc, true);
+				return load_simple_image(desc, true, owner_uid);
 			}
 		}
 
@@ -517,19 +620,22 @@ namespace gl
 			}
 		}
 
-		void run(u16 w, u16 h, GLuint target, rsx::overlays::user_interface& ui)
+		void run(u16 w, u16 h, GLuint target, rsx::overlays::overlay& ui)
 		{
+			program_handle.uniforms["viewport"] = color2f(f32(w), f32(h));
 			program_handle.uniforms["ui_scale"] = color4f((f32)ui.virtual_width, (f32)ui.virtual_height, 1.f, 1.f);
 			program_handle.uniforms["time"] = (f32)(get_system_time() / 1000) * 0.005f;
+
+			saved_sampler_state saved(31, m_sampler);
+
 			for (auto &cmd : ui.get_compiled().draw_commands)
 			{
-				upload_vertex_data((f32*)cmd.second.data(), (u32)cmd.second.size() * 4u);
-				num_drawable_elements = (u32)cmd.second.size();
+				upload_vertex_data((f32*)cmd.verts.data(), (u32)cmd.verts.size() * 4u);
+				num_drawable_elements = (u32)cmd.verts.size();
 				is_font_draw = false;
 				GLint texture_exists = GL_TRUE;
 
-				glActiveTexture(GL_TEXTURE31);
-				switch (cmd.first.texture_ref)
+				switch (cmd.config.texture_ref)
 				{
 				case rsx::overlays::image_resource_id::game_icon:
 				case rsx::overlays::image_resource_id::backbuffer:
@@ -542,27 +648,28 @@ namespace gl
 				}
 				case rsx::overlays::image_resource_id::raw_image:
 				{
-					glBindTexture(GL_TEXTURE_2D, find_temp_image((rsx::overlays::image_info*)cmd.first.external_data_ref)->id());
+					glBindTexture(GL_TEXTURE_2D, find_temp_image((rsx::overlays::image_info*)cmd.config.external_data_ref, ui.uid)->id());
 					break;
 				}
 				case rsx::overlays::image_resource_id::font_file:
 				{
 					is_font_draw = true;
-					glBindTexture(GL_TEXTURE_2D, find_font(cmd.first.font_ref)->id());
+					glBindTexture(GL_TEXTURE_2D, find_font(cmd.config.font_ref)->id());
 					break;
 				}
 				default:
 				{
-					glBindTexture(GL_TEXTURE_2D, resources[cmd.first.texture_ref - 1]->id());
+					glBindTexture(GL_TEXTURE_2D, view_cache[cmd.config.texture_ref - 1]->id());
 					break;
 				}
 				}
 
-				program_handle.uniforms["color"] = cmd.first.color;
+				program_handle.uniforms["color"] = cmd.config.color;
 				program_handle.uniforms["read_texture"] = texture_exists;
-				program_handle.uniforms["pulse_glow"] = (s32)cmd.first.pulse_glow;
-				program_handle.uniforms["clip_region"] = (s32)cmd.first.clip_region;
-				program_handle.uniforms["clip_bounds"] = cmd.first.clip_rect;
+				program_handle.uniforms["pulse_glow"] = (s32)cmd.config.pulse_glow;
+				program_handle.uniforms["blur_strength"] = (s32)cmd.config.blur_strength;
+				program_handle.uniforms["clip_region"] = (s32)cmd.config.clip_region;
+				program_handle.uniforms["clip_bounds"] = cmd.config.clip_rect;
 				overlay_pass::run(w, h, target, false, true);
 			}
 
@@ -613,6 +720,8 @@ namespace gl
 				"		ocol = color;\n"
 				"}\n"
 			};
+
+			input_filter = GL_LINEAR;
 		}
 
 		void run(u16 w, u16 h, GLuint source, const areai& region, f32 gamma, bool limited_rgb)
@@ -629,7 +738,7 @@ namespace gl
 			program_handle.uniforms["gamma"] = gamma;
 			program_handle.uniforms["limit_range"] = (int)limited_rgb;
 
-			glActiveTexture(GL_TEXTURE31);
+			saved_sampler_state saved(31, m_sampler);
 			glBindTexture(GL_TEXTURE_2D, source);
 			overlay_pass::run(w, h, GL_NONE, false, false);
 		}

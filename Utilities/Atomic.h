@@ -1,9 +1,10 @@
 #pragma once
 
 #include "types.h"
+#include <functional>
 
 // Helper class, provides access to compiler-specific atomic intrinsics
-template<typename T, std::size_t Size>
+template <typename T, std::size_t Size = sizeof(T)>
 struct atomic_storage
 {
 	static_assert(sizeof(T) <= 16 && sizeof(T) == alignof(T), "atomic_storage<> error: invalid type");
@@ -11,9 +12,24 @@ struct atomic_storage
 	/* First part: Non-MSVC intrinsics */
 
 #ifndef _MSC_VER
+
+#if defined(__ATOMIC_HLE_ACQUIRE) && defined(__ATOMIC_HLE_RELEASE)
+	static constexpr int s_hle_ack = __ATOMIC_SEQ_CST | __ATOMIC_HLE_ACQUIRE;
+	static constexpr int s_hle_rel = __ATOMIC_SEQ_CST | __ATOMIC_HLE_RELEASE;
+#else
+	static constexpr int s_hle_ack = __ATOMIC_SEQ_CST;
+	static constexpr int s_hle_rel = __ATOMIC_SEQ_CST;
+#endif
+
 	static inline bool compare_exchange(T& dest, T& comp, T exch)
 	{
 		return __atomic_compare_exchange(&dest, &comp, &exch, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+	}
+
+	static inline bool compare_exchange_hle_acq(T& dest, T& comp, T exch)
+	{
+		static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+		return __atomic_compare_exchange(&dest, &comp, &exch, false, s_hle_ack, s_hle_ack);
 	}
 
 	static inline T load(const T& dest)
@@ -28,6 +44,11 @@ struct atomic_storage
 		__atomic_store(&dest, &value, __ATOMIC_SEQ_CST);
 	}
 
+	static inline void release(T& dest, T value)
+	{
+		__atomic_store(&dest, &value, __ATOMIC_RELEASE);
+	}
+
 	static inline T exchange(T& dest, T value)
 	{
 		T result;
@@ -38,6 +59,12 @@ struct atomic_storage
 	static inline T fetch_add(T& dest, T value)
 	{
 		return __atomic_fetch_add(&dest, value, __ATOMIC_SEQ_CST);
+	}
+
+	static inline T fetch_add_hle_rel(T& dest, T value)
+	{
+		static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+		return __atomic_fetch_add(&dest, value, s_hle_rel);
 	}
 
 	static inline T add_fetch(T& dest, T value)
@@ -175,7 +202,7 @@ struct atomic_storage
 
 /* The rest: ugly MSVC intrinsics + inline asm implementations */
 
-template<typename T>
+template <typename T>
 struct atomic_storage<T, 1> : atomic_storage<T, 0>
 {
 #ifdef _MSC_VER
@@ -197,6 +224,12 @@ struct atomic_storage<T, 1> : atomic_storage<T, 0>
 	static inline void store(T& dest, T value)
 	{
 		_InterlockedExchange8((volatile char*)&dest, (char&)value);
+	}
+
+	static inline void release(T& dest, T value)
+	{
+		_ReadWriteBarrier();
+		*(volatile char*)&dest = (char&)value;
 	}
 
 	static inline T exchange(T& dest, T value)
@@ -231,7 +264,7 @@ struct atomic_storage<T, 1> : atomic_storage<T, 0>
 #endif
 };
 
-template<typename T>
+template <typename T>
 struct atomic_storage<T, 2> : atomic_storage<T, 0>
 {
 #ifdef _MSC_VER
@@ -253,6 +286,12 @@ struct atomic_storage<T, 2> : atomic_storage<T, 0>
 	static inline void store(T& dest, T value)
 	{
 		_InterlockedExchange16((volatile short*)&dest, (short&)value);
+	}
+
+	static inline void release(T& dest, T value)
+	{
+		_ReadWriteBarrier();
+		*(volatile short*)&dest = (short&)value;
 	}
 
 	static inline T exchange(T& dest, T value)
@@ -323,7 +362,7 @@ struct atomic_storage<T, 2> : atomic_storage<T, 0>
 #endif
 };
 
-template<typename T>
+template <typename T>
 struct atomic_storage<T, 4> : atomic_storage<T, 0>
 {
 #ifdef _MSC_VER
@@ -331,6 +370,14 @@ struct atomic_storage<T, 4> : atomic_storage<T, 0>
 	{
 		long v = *(long*)&comp;
 		long r = _InterlockedCompareExchange((volatile long*)&dest, (long&)exch, v);
+		comp = (T&)r;
+		return r == v;
+	}
+
+	static inline bool compare_exchange_hle_acq(T& dest, T& comp, T exch)
+	{
+		long v = *(long*)&comp;
+		long r = _InterlockedCompareExchange_HLEAcquire((volatile long*)&dest, (long&)exch, v);
 		comp = (T&)r;
 		return r == v;
 	}
@@ -347,6 +394,12 @@ struct atomic_storage<T, 4> : atomic_storage<T, 0>
 		_InterlockedExchange((volatile long*)&dest, (long&)value);
 	}
 
+	static inline void release(T& dest, T value)
+	{
+		_ReadWriteBarrier();
+		*(volatile long*)&dest = (long&)value;
+	}
+
 	static inline T exchange(T& dest, T value)
 	{
 		long r = _InterlockedExchange((volatile long*)&dest, (long&)value);
@@ -356,6 +409,12 @@ struct atomic_storage<T, 4> : atomic_storage<T, 0>
 	static inline T fetch_add(T& dest, T value)
 	{
 		long r = _InterlockedExchangeAdd((volatile long*)&dest, (long&)value);
+		return (T&)r;
+	}
+
+	static inline T fetch_add_hle_rel(T& dest, T value)
+	{
+		long r = _InterlockedExchangeAdd_HLERelease((volatile long*)&dest, (long&)value);
 		return (T&)r;
 	}
 
@@ -422,7 +481,7 @@ struct atomic_storage<T, 4> : atomic_storage<T, 0>
 #endif
 };
 
-template<typename T>
+template <typename T>
 struct atomic_storage<T, 8> : atomic_storage<T, 0>
 {
 #ifdef _MSC_VER
@@ -430,6 +489,14 @@ struct atomic_storage<T, 8> : atomic_storage<T, 0>
 	{
 		llong v = *(llong*)&comp;
 		llong r = _InterlockedCompareExchange64((volatile llong*)&dest, (llong&)exch, v);
+		comp = (T&)r;
+		return r == v;
+	}
+
+	static inline bool compare_exchange_hle_acq(T& dest, T& comp, T exch)
+	{
+		llong v = *(llong*)&comp;
+		llong r = _InterlockedCompareExchange64_HLEAcquire((volatile llong*)&dest, (llong&)exch, v);
 		comp = (T&)r;
 		return r == v;
 	}
@@ -446,6 +513,12 @@ struct atomic_storage<T, 8> : atomic_storage<T, 0>
 		_InterlockedExchange64((volatile llong*)&dest, (llong&)value);
 	}
 
+	static inline void release(T& dest, T value)
+	{
+		_ReadWriteBarrier();
+		*(volatile llong*)&dest = (llong&)value;
+	}
+
 	static inline T exchange(T& dest, T value)
 	{
 		llong r = _InterlockedExchange64((volatile llong*)&dest, (llong&)value);
@@ -455,6 +528,12 @@ struct atomic_storage<T, 8> : atomic_storage<T, 0>
 	static inline T fetch_add(T& dest, T value)
 	{
 		llong r = _InterlockedExchangeAdd64((volatile llong*)&dest, (llong&)value);
+		return (T&)r;
+	}
+
+	static inline T fetch_add_hle_rel(T& dest, T value)
+	{
+		llong r = _InterlockedExchangeAdd64_HLERelease((volatile llong*)&dest, (llong&)value);
 		return (T&)r;
 	}
 
@@ -524,7 +603,7 @@ struct atomic_storage<T, 8> : atomic_storage<T, 0>
 #endif
 };
 
-template<typename T>
+template <typename T>
 struct atomic_storage<T, 16> : atomic_storage<T, 0>
 {
 #ifdef _MSC_VER
@@ -549,6 +628,14 @@ struct atomic_storage<T, 16> : atomic_storage<T, 0>
 		while (!_InterlockedCompareExchange128((volatile llong*)&dest, hi, lo, cmp));
 	}
 
+	static inline void release(T& dest, T value)
+	{
+		llong lo = *(llong*)&value;
+		llong hi = *((llong*)&value + 1);
+		llong cmp[2]{ *(volatile llong*)&dest, *((volatile llong*)&dest + 1) };
+		while (!_InterlockedCompareExchange128((volatile llong*)&dest, hi, lo, cmp));
+	}
+
 	static inline T exchange(T& dest, T value)
 	{
 		llong lo = *(llong*)&value;
@@ -562,206 +649,11 @@ struct atomic_storage<T, 16> : atomic_storage<T, 0>
 	// TODO
 };
 
-template<typename T1, typename T2, typename>
-struct atomic_add
-{
-	auto operator()(T1& lhs, const T2& rhs) const
-	{
-		return lhs += rhs;
-	}
-};
-
-template<typename T1, typename T2>
-struct atomic_add<T1, T2, std::enable_if_t<std::is_integral<T1>::value && std::is_convertible<T2, T1>::value>>
-{
-	static constexpr auto fetch_op = &atomic_storage<T1>::fetch_add;
-	static constexpr auto op_fetch = &atomic_storage<T1>::add_fetch;
-	static constexpr auto atomic_op = &atomic_storage<T1>::add_fetch;
-};
-
-template<typename T1, typename T2, typename>
-struct atomic_sub
-{
-	auto operator()(T1& lhs, const T2& rhs) const
-	{
-		return lhs -= rhs;
-	}
-};
-
-template<typename T1, typename T2>
-struct atomic_sub<T1, T2, std::enable_if_t<std::is_integral<T1>::value && std::is_convertible<T2, T1>::value>>
-{
-	static constexpr auto fetch_op = &atomic_storage<T1>::fetch_sub;
-	static constexpr auto op_fetch = &atomic_storage<T1>::sub_fetch;
-	static constexpr auto atomic_op = &atomic_storage<T1>::sub_fetch;
-};
-
-template<typename T, typename>
-struct atomic_pre_inc
-{
-	auto operator()(T& v) const
-	{
-		return ++v;
-	}
-};
-
-template<typename T>
-struct atomic_pre_inc<T, std::enable_if_t<std::is_integral<T>::value>>
-{
-	static constexpr auto atomic_op = &atomic_storage<T>::inc_fetch;
-};
-
-template<typename T, typename>
-struct atomic_post_inc
-{
-	auto operator()(T& v) const
-	{
-		return v++;
-	}
-};
-
-template<typename T>
-struct atomic_post_inc<T, std::enable_if_t<std::is_integral<T>::value>>
-{
-	static constexpr auto atomic_op = &atomic_storage<T>::fetch_inc;
-};
-
-template<typename T, typename>
-struct atomic_pre_dec
-{
-	auto operator()(T& v) const
-	{
-		return --v;
-	}
-};
-
-template<typename T>
-struct atomic_pre_dec<T, std::enable_if_t<std::is_integral<T>::value>>
-{
-	static constexpr auto atomic_op = &atomic_storage<T>::dec_fetch;
-};
-
-template<typename T, typename>
-struct atomic_post_dec
-{
-	auto operator()(T& v) const
-	{
-		return v--;
-	}
-};
-
-template<typename T>
-struct atomic_post_dec<T, std::enable_if_t<std::is_integral<T>::value>>
-{
-	static constexpr auto atomic_op = &atomic_storage<T>::fetch_dec;
-};
-
-template<typename T1, typename T2, typename>
-struct atomic_and
-{
-	auto operator()(T1& lhs, const T2& rhs) const
-	{
-		return lhs &= rhs;
-	}
-};
-
-template<typename T1, typename T2>
-struct atomic_and<T1, T2, std::enable_if_t<std::is_integral<T1>::value && std::is_convertible<T2, T1>::value>>
-{
-	static constexpr auto fetch_op = &atomic_storage<T1>::fetch_and;
-	static constexpr auto op_fetch = &atomic_storage<T1>::and_fetch;
-	static constexpr auto atomic_op = &atomic_storage<T1>::and_fetch;
-};
-
-template<typename T1, typename T2, typename>
-struct atomic_or
-{
-	auto operator()(T1& lhs, const T2& rhs) const
-	{
-		return lhs |= rhs;
-	}
-};
-
-template<typename T1, typename T2>
-struct atomic_or<T1, T2, std::enable_if_t<std::is_integral<T1>::value && std::is_convertible<T2, T1>::value>>
-{
-	static constexpr auto fetch_op = &atomic_storage<T1>::fetch_or;
-	static constexpr auto op_fetch = &atomic_storage<T1>::or_fetch;
-	static constexpr auto atomic_op = &atomic_storage<T1>::or_fetch;
-};
-
-template<typename T1, typename T2, typename>
-struct atomic_xor
-{
-	auto operator()(T1& lhs, const T2& rhs) const
-	{
-		return lhs ^= rhs;
-	}
-};
-
-template<typename T1, typename T2>
-struct atomic_xor<T1, T2, std::enable_if_t<std::is_integral<T1>::value && std::is_convertible<T2, T1>::value>>
-{
-	static constexpr auto fetch_op = &atomic_storage<T1>::fetch_xor;
-	static constexpr auto op_fetch = &atomic_storage<T1>::xor_fetch;
-	static constexpr auto atomic_op = &atomic_storage<T1>::xor_fetch;
-};
-
-template<typename T1, typename T2, typename>
-struct atomic_test_and_set
-{
-	bool operator()(T1& lhs, const T2& rhs) const
-	{
-		return test_and_set(lhs, rhs);
-	}
-};
-
-template<typename T1, typename T2>
-struct atomic_test_and_set<T1, T2, std::enable_if_t<std::is_integral<T1>::value && std::is_convertible<T2, T1>::value>>
-{
-	static constexpr auto fetch_op = &atomic_storage<T1>::test_and_set;
-	static constexpr auto op_fetch = &atomic_storage<T1>::test_and_set;
-	static constexpr auto atomic_op = &atomic_storage<T1>::test_and_set;
-};
-
-template<typename T1, typename T2, typename>
-struct atomic_test_and_reset
-{
-	bool operator()(T1& lhs, const T2& rhs) const
-	{
-		return test_and_reset(lhs, rhs);
-	}
-};
-
-template<typename T1, typename T2>
-struct atomic_test_and_reset<T1, T2, std::enable_if_t<std::is_integral<T1>::value && std::is_convertible<T2, T1>::value>>
-{
-	static constexpr auto fetch_op = &atomic_storage<T1>::test_and_reset;
-	static constexpr auto op_fetch = &atomic_storage<T1>::test_and_reset;
-	static constexpr auto atomic_op = &atomic_storage<T1>::test_and_reset;
-};
-
-template<typename T1, typename T2, typename>
-struct atomic_test_and_complement
-{
-	bool operator()(T1& lhs, const T2& rhs) const
-	{
-		return test_and_complement(lhs, rhs);
-	}
-};
-
-template<typename T1, typename T2>
-struct atomic_test_and_complement<T1, T2, std::enable_if_t<std::is_integral<T1>::value && std::is_convertible<T2, T1>::value>>
-{
-	static constexpr auto fetch_op = &atomic_storage<T1>::test_and_complement;
-	static constexpr auto op_fetch = &atomic_storage<T1>::test_and_complement;
-	static constexpr auto atomic_op = &atomic_storage<T1>::test_and_complement;
-};
-
 // Atomic type with lock-free and standard layout guarantees (and appropriate limitations)
-template<typename T>
+template <typename T>
 class atomic_t
 {
+protected:
 	using type = typename std::remove_cv<T>::type;
 
 	static_assert(alignof(type) == sizeof(type), "atomic_t<> error: unexpected alignment, use alignas() if necessary");
@@ -769,7 +661,7 @@ class atomic_t
 	type m_data;
 
 public:
-	atomic_t() = default;
+	atomic_t() noexcept = default;
 
 	atomic_t(const atomic_t&) = delete;
 
@@ -778,7 +670,7 @@ public:
 	// Define simple type
 	using simple_type = simple_t<T>;
 
-	explicit constexpr atomic_t(const type& value)
+	constexpr atomic_t(const type& value) noexcept
 		: m_data(value)
 	{
 	}
@@ -790,7 +682,7 @@ public:
 	}
 
 	// Atomically compare data with cmp, replace with exch if equal, return previous data value anyway
-	simple_type compare_and_swap(const type& cmp, const type& exch)
+	type compare_and_swap(const type& cmp, const type& exch)
 	{
 		type old = cmp;
 		atomic_storage<type>::compare_exchange(m_data, old, exch);
@@ -804,81 +696,134 @@ public:
 		return atomic_storage<type>::compare_exchange(m_data, old, exch);
 	}
 
-	// Atomic operation; returns old value, discards function result value
-	template<typename F, typename... Args, typename RT = std::result_of_t<F(T&, const Args&...)>>
-	type fetch_op(F&& func, const Args&... args)
+	// As in std::atomic
+	bool compare_exchange(type& cmp_and_old, const type& exch)
+	{
+		return atomic_storage<type>::compare_exchange(m_data, cmp_and_old, exch);
+	}
+
+	// Atomic operation; returns old value, or pair of old value and return value (cancel op if evaluates to false)
+	template <typename F, typename RT = std::invoke_result_t<F, T&>>
+	std::conditional_t<std::is_void_v<RT>, type, std::pair<type, RT>> fetch_op(F&& func)
 	{
 		type _new, old = atomic_storage<type>::load(m_data);
 
 		while (true)
 		{
-			func((_new = old), args...);
+			_new = old;
 
-			if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new))) return old;
+			if constexpr (std::is_void_v<RT>)
+			{
+				std::invoke(std::forward<F>(func), _new);
+
+				if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new)))
+				{
+					return old;
+				}
+			}
+			else
+			{
+				RT ret = std::invoke(std::forward<F>(func), _new);
+
+				if (LIKELY(!ret || atomic_storage<type>::compare_exchange(m_data, old, _new)))
+				{
+					return {old, std::move(ret)};
+				}
+			}
 		}
 	}
 
-	// Helper overload for calling optimized implementation
-	template<typename F, typename... Args, typename FT = decltype(F::fetch_op), typename RT = std::result_of_t<FT(T&, const Args&...)>>
-	type fetch_op(F&&, const Args&... args)
-	{
-		return F::fetch_op(m_data, args...);
-	}
-
-	// Atomic operation; returns new value, discards function result value
-	template<typename F, typename... Args, typename RT = std::result_of_t<F(T&, const Args&...)>>
-	type op_fetch(F&& func, const Args&... args)
+	// fetch_op overload with function (invokable) provided as a template parameter
+	template <auto F, typename RT = std::invoke_result_t<decltype(F), T&>>
+	std::conditional_t<std::is_void_v<RT>, type, std::pair<type, RT>> fetch_op()
 	{
 		type _new, old = atomic_storage<type>::load(m_data);
 
 		while (true)
 		{
-			func((_new = old), args...);
+			_new = old;
 
-			if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new))) return _new;
+			if constexpr (std::is_void_v<RT>)
+			{
+				std::invoke(F, _new);
+
+				if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new)))
+				{
+					return old;
+				}
+			}
+			else
+			{
+				RT ret = std::invoke(F, _new);
+
+				if (LIKELY(!ret || atomic_storage<type>::compare_exchange(m_data, old, _new)))
+				{
+					return {old, std::move(ret)};
+				}
+			}
 		}
 	}
 
-	// Helper overload for calling optimized implementation
-	template<typename F, typename... Args, typename FT = decltype(F::op_fetch), typename RT = std::result_of_t<FT(T&, const Args&...)>>
-	type op_fetch(F&&, const Args&... args)
-	{
-		return F::op_fetch(m_data, args...);
-	}
-
-	// Atomic operation; returns function result value
-	template<typename F, typename... Args, typename RT = std::result_of_t<F(T&, const Args&...)>, typename = std::enable_if_t<!std::is_void<RT>::value>>
-	RT atomic_op(F&& func, const Args&... args)
+	// Atomic operation; returns function result value, function is the lambda
+	template <typename F, typename RT = std::invoke_result_t<F, T&>>
+	RT atomic_op(F&& func)
 	{
 		type _new, old = atomic_storage<type>::load(m_data);
 
 		while (true)
 		{
-			RT&& result = func((_new = old), args...);
+			_new = old;
 
-			if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new))) return std::move(result);
+			if constexpr (std::is_void_v<RT>)
+			{
+				std::invoke(std::forward<F>(func), _new);
+
+				if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new)))
+				{
+					return;
+				}
+			}
+			else
+			{
+				RT result = std::invoke(std::forward<F>(func), _new);
+
+				if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new)))
+				{
+					return result;
+				}
+			}
 		}
 	}
 
-	// Overload for void return type
-	template<typename F, typename... Args, typename RT = std::result_of_t<F(T&, const Args&...)>, typename = std::enable_if_t<std::is_void<RT>::value>>
-	void atomic_op(F&& func, const Args&... args)
+	// atomic_op overload with function (invokable) provided as a template parameter
+	template <auto F, typename RT = std::invoke_result_t<decltype(F), T&>>
+	RT atomic_op()
 	{
 		type _new, old = atomic_storage<type>::load(m_data);
 
 		while (true)
 		{
-			func((_new = old), args...);
+			_new = old;
 
-			if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new))) return;
+			if constexpr (std::is_void_v<RT>)
+			{
+				std::invoke(F, _new);
+
+				if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new)))
+				{
+					return;
+				}
+			}
+			else
+			{
+				RT result = std::invoke(F, _new);
+
+				if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new)))
+				{
+					return result;
+				}
+			}
 		}
-	}
-
-	// Helper overload for calling optimized implementation
-	template<typename F, typename... Args, typename FT = decltype(F::atomic_op), typename RT = std::result_of_t<FT(T&, const Args&...)>>
-	auto atomic_op(F&&, const Args&... args)
-	{
-		return F::atomic_op(m_data, args...);
 	}
 
 	// Atomically read data
@@ -905,150 +850,313 @@ public:
 		return rhs;
 	}
 
+	// Atomically write data with release memory order (faster on x86)
+	void release(const type& rhs)
+	{
+		atomic_storage<type>::release(m_data, rhs);
+	}
+
 	// Atomically replace data with value, return previous data value
 	type exchange(const type& rhs)
 	{
 		return atomic_storage<type>::exchange(m_data, rhs);
 	}
 
-	template<typename T2>
-	type fetch_add(const T2& rhs)
+	type fetch_add(const type& rhs)
 	{
-		return fetch_op(atomic_add<type, T2>{}, rhs);
-	}
-	
-	template<typename T2>
-	type add_fetch(const T2& rhs)
-	{
-		return op_fetch(atomic_add<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::fetch_add(m_data, rhs);
+		}
+
+		return fetch_op([&](T& v)
+		{
+			v += rhs;
+		});
 	}
 
-	template<typename T2>
-	auto operator +=(const T2& rhs)
+	type add_fetch(const type& rhs)
 	{
-		return atomic_op(atomic_add<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::add_fetch(m_data, rhs);
+		}
+
+		return atomic_op([&](T& v)
+		{
+			v += rhs;
+			return v;
+		});
 	}
 
-	template<typename T2>
-	type fetch_sub(const T2& rhs)
+	auto operator +=(const type& rhs)
 	{
-		return fetch_op(atomic_sub<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::add_fetch(m_data, rhs);
+		}
+
+		return atomic_op([&](T& v)
+		{
+			return v += rhs;
+		});
 	}
 
-	template<typename T2>
-	type sub_fetch(const T2& rhs)
+	type fetch_sub(const type& rhs)
 	{
-		return op_fetch(atomic_sub<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::fetch_sub(m_data, rhs);
+		}
+
+		return fetch_op([&](T& v)
+		{
+			v -= rhs;
+		});
 	}
 
-	template<typename T2>
-	auto operator -=(const T2& rhs)
+	type sub_fetch(const type& rhs)
 	{
-		return atomic_op(atomic_sub<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::sub_fetch(m_data, rhs);
+		}
+
+		return atomic_op([&](T& v)
+		{
+			v -= rhs;
+			return v;
+		});
 	}
 
-	template<typename T2>
-	type fetch_and(const T2& rhs)
+	auto operator -=(const type& rhs)
 	{
-		return fetch_op(atomic_and<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::sub_fetch(m_data, rhs);
+		}
+
+		return atomic_op([&](T& v)
+		{
+			return v -= rhs;
+		});
 	}
 
-	template<typename T2>
-	type and_fetch(const T2& rhs)
+	type fetch_and(const type& rhs)
 	{
-		return op_fetch(atomic_and<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::fetch_and(m_data, rhs);
+		}
+
+		return fetch_op([&](T& v)
+		{
+			v &= rhs;
+		});
 	}
 
-	template<typename T2>
-	auto operator &=(const T2& rhs)
+	type and_fetch(const type& rhs)
 	{
-		return atomic_op(atomic_and<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::and_fetch(m_data, rhs);
+		}
+
+		return atomic_op([&](T& v)
+		{
+			v &= rhs;
+			return v;
+		});
 	}
 
-	template<typename T2>
-	type fetch_or(const T2& rhs)
+	auto operator &=(const type& rhs)
 	{
-		return fetch_op(atomic_or<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::and_fetch(m_data, rhs);
+		}
+
+		return atomic_op([&](T& v)
+		{
+			return v &= rhs;
+		});
 	}
 
-	template<typename T2>
-	type or_fetch(const T2& rhs)
+	type fetch_or(const type& rhs)
 	{
-		return op_fetch(atomic_or<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::fetch_or(m_data, rhs);
+		}
+
+		return fetch_op([&](T& v)
+		{
+			v |= rhs;
+		});
 	}
 
-	template<typename T2>
-	auto operator |=(const T2& rhs)
+	type or_fetch(const type& rhs)
 	{
-		return atomic_op(atomic_or<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::or_fetch(m_data, rhs);
+		}
+
+		return atomic_op([&](T& v)
+		{
+			v |= rhs;
+			return v;
+		});
 	}
 
-	template<typename T2>
-	type fetch_xor(const T2& rhs)
+	auto operator |=(const type& rhs)
 	{
-		return fetch_op(atomic_xor<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::or_fetch(m_data, rhs);
+		}
+
+		return atomic_op([&](T& v)
+		{
+			return v |= rhs;
+		});
 	}
 
-	template<typename T2>
-	type xor_fetch(const T2& rhs)
+	type fetch_xor(const type& rhs)
 	{
-		return op_fetch(atomic_xor<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::fetch_xor(m_data, rhs);
+		}
+
+		return fetch_op([&](T& v)
+		{
+			v ^= rhs;
+		});
 	}
 
-	template<typename T2>
-	auto operator ^=(const T2& rhs)
+	type xor_fetch(const type& rhs)
 	{
-		return atomic_op(atomic_xor<type, T2>{}, rhs);
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::xor_fetch(m_data, rhs);
+		}
+
+		return atomic_op([&](T& v)
+		{
+			v ^= rhs;
+			return v;
+		});
+	}
+
+	auto operator ^=(const type& rhs)
+	{
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::xor_fetch(m_data, rhs);
+		}
+
+		return atomic_op([&](T& v)
+		{
+			return v ^= rhs;
+		});
 	}
 
 	auto operator ++()
 	{
-		return atomic_op(atomic_pre_inc<type>{});
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::inc_fetch(m_data);
+		}
+
+		return atomic_op([](T& v)
+		{
+			return ++v;
+		});
 	}
 
 	auto operator --()
 	{
-		return atomic_op(atomic_pre_dec<type>{});
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::dec_fetch(m_data);
+		}
+
+		return atomic_op([](T& v)
+		{
+			return --v;
+		});
 	}
 
 	auto operator ++(int)
 	{
-		return atomic_op(atomic_post_inc<type>{});
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::fetch_inc(m_data);
+		}
+
+		return atomic_op([](T& v)
+		{
+			return v++;
+		});
 	}
 
 	auto operator --(int)
 	{
-		return atomic_op(atomic_post_dec<type>{});
+		if constexpr(std::is_integral<type>::value)
+		{
+			return atomic_storage<type>::fetch_dec(m_data);
+		}
+
+		return atomic_op([](T& v)
+		{
+			return v--;
+		});
 	}
 
-	template<typename T2 = T>
-	auto test_and_set(const T2& rhs)
+	// Conditionally decrement
+	bool try_dec(simple_type greater_than = std::numeric_limits<simple_type>::min())
 	{
-		return atomic_op(atomic_test_and_set<type, T2>{}, rhs);
+		type _new, old = atomic_storage<type>::load(m_data);
+
+		while (true)
+		{
+			_new = old;
+
+			if (!(_new > greater_than))
+			{
+				return false;
+			}
+
+			_new -= 1;
+
+			if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new)))
+			{
+				return true;
+			}
+		}
 	}
 
-	template<typename T2 = T>
-	auto test_and_reset(const T2& rhs)
+	// Conditionally increment
+	bool try_inc(simple_type less_than = std::numeric_limits<simple_type>::max())
 	{
-		return atomic_op(atomic_test_and_reset<type, T2>{}, rhs);
-	}
+		type _new, old = atomic_storage<type>::load(m_data);
 
-	template<typename T2 = T>
-	auto test_and_complement(const T2& rhs)
-	{
-		return atomic_op(atomic_test_and_complement<type, T2>{}, rhs);
-	}
+		while (true)
+		{
+			_new = old;
 
-	// Minimal pointer support (TODO: must forward operator ->())
-	type operator ->() const
-	{
-		return load();
-	}
+			if (!(_new < less_than))
+			{
+				return false;
+			}
 
-	// Minimal array support
-	template<typename I = std::size_t>
-	auto operator [](const I& index) const -> decltype(std::declval<const type>()[std::declval<I>()])
-	{
-		return load()[index];
+			_new += 1;
+
+			if (LIKELY(atomic_storage<type>::compare_exchange(m_data, old, _new)))
+			{
+				return true;
+			}
+		}
 	}
 };

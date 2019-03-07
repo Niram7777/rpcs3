@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "Utilities/File.h"
 #include "Utilities/Log.h"
@@ -10,6 +10,7 @@
 #include <QMap>
 #include <QObject>
 #include <QComboBox>
+#include <QSpinBox>
 
 constexpr auto qstr = QString::fromStdString;
 
@@ -37,6 +38,15 @@ public:
 		PPUDebug,
 		SPUDebug,
 		MaxLLVMThreads,
+		EnableTSX,
+		AccurateGETLLAR,
+		AccuratePUTLLUC,
+		AccurateXFloat,
+		SetDAZandFTZ,
+		SPUBlockSize,
+		SPUCache,
+		SPUVerification,
+		DebugConsoleMode,
 
 		// Graphics
 		Renderer,
@@ -60,17 +70,43 @@ public:
 		StrictRenderingMode,
 		DisableVertexCache,
 		DisableOcclusionQueries,
+		DisableFIFOReordering,
+		StrictTextureFlushing,
 		AnisotropicFilterOverride,
 		ResolutionScale,
 		MinimumScalableDimension,
 		ForceCPUBlitEmulation,
 		DisableOnDiskShaderCache,
+		DisableVulkanMemAllocator,
+		DisableAsyncShaderCompiler,
+
+		// Performance Overlay
+		PerfOverlayEnabled,
+		PerfOverlayDetailLevel,
+		PerfOverlayPosition,
+		PerfOverlayUpdateInterval,
+		PerfOverlayFontSize,
+		PerfOverlayOpacity,
+		PerfOverlayMarginX,
+		PerfOverlayMarginY,
+		PerfOverlayCenterX,
+		PerfOverlayCenterY,
+
+		// Shader Loading Dialog
+		ShaderLoadBgEnabled,
+		ShaderLoadBgDarkening,
+		ShaderLoadBgBlur,
 
 		// Audio
 		AudioRenderer,
 		DumpToFile,
 		ConvertTo16Bit,
 		DownmixStereo,
+		MasterVolume,
+		EnableBuffering,
+		AudioBufferDuration,
+		EnableTimeStretching,
+		TimeStretchingThreshold,
 
 		// Input / Output
 		PadHandler,
@@ -93,9 +129,12 @@ public:
 		// Network
 		ConnectionStatus,
 
-		// Language
+		// System
 		Language,
+		EnterButtonAssignment,
 		EnableHostRoot,
+		LimitCacheSize,
+		MaximumCacheSize,
 
 		// Virtual File System
 		emulatorLocation,
@@ -126,7 +165,7 @@ public:
 		bool supportsVulkan = false;
 		QStringList D3D12Adapters;
 		QStringList vulkanAdapters;
-		QString name_Null = tr("Null");
+		QString name_Null = tr("Disable Video Output");
 		QString name_Vulkan = tr("Vulkan");
 		QString name_D3D12 = tr("D3D12[DO NOT USE]");
 		QString name_OpenGL = tr("OpenGL");
@@ -138,6 +177,8 @@ public:
 
 		Render_Creator();
 	};
+
+	std::set<SettingsType> m_broken_types; // list of broken settings
 
 	/** Creates a settings object which reads in the config.yml file at rpcs3/bin/%path%/config.yml
 	* Settings are only written when SaveSettings is called.
@@ -152,7 +193,13 @@ public:
 	void EnhanceCheckBox(QCheckBox* checkbox, SettingsType type);
 
 	/** Connects a slider with the target settings type*/
-	void EnhanceSlider(QSlider* slider, SettingsType type, bool is_ranged = false);
+	void EnhanceSlider(QSlider* slider, SettingsType type);
+
+	/** Connects an integer spin box with the target settings type*/
+	void EnhanceSpinBox(QSpinBox* slider, SettingsType type, const QString& prefix = "", const QString& suffix = "");
+
+	/** Connects a double spin box with the target settings type*/
+	void EnhanceDoubleSpinBox(QDoubleSpinBox* slider, SettingsType type, const QString& prefix = "", const QString& suffix = "");
 
 	std::vector<std::string> GetLoadedLibraries();
 	void SaveSelectedLibraries(const std::vector<std::string>& libs);
@@ -176,7 +223,10 @@ public:
 	Render_Creator m_render_creator;
 
 	/** Loads the settings from path.*/
-	void LoadSettings(const std::string& path = "");
+	void LoadSettings(const std::string& title_id = "");
+
+	/** Fixes all registered invalid settings after asking the user for permission.*/
+	void OpenCorrectionDialog(QWidget* parent = Q_NULLPTR);
 
 public Q_SLOTS:
 	/** Writes the unsaved settings to file.  Used in settings dialog on accept.*/
@@ -197,40 +247,75 @@ private:
 		{ PPUDebug,                 { "Core", "PPU Debug"}},
 		{ SPUDebug,                 { "Core", "SPU Debug"}},
 		{ MaxLLVMThreads,           { "Core", "Max LLVM Compile Threads"}},
+		{ EnableTSX,                { "Core", "Enable TSX"}},
+		{ AccurateGETLLAR,          { "Core", "Accurate GETLLAR"}},
+		{ AccuratePUTLLUC,          { "Core", "Accurate PUTLLUC"}},
+		{ AccurateXFloat,           { "Core", "Accurate xfloat"}},
+		{ SetDAZandFTZ,             { "Core", "Set DAZ and FTZ"}},
+		{ SPUBlockSize,             { "Core", "SPU Block Size"}},
+		{ SPUCache,                 { "Core", "SPU Cache"}},
+		{ SPUVerification,          { "Core", "SPU Verification"}},
+		{ DebugConsoleMode,         { "Core", "Debug Console Mode"}},
 
 		// Graphics Tab
-		{ Renderer,                 { "Video", "Renderer"}},
-		{ Resolution,               { "Video", "Resolution"}},
-		{ AspectRatio,              { "Video", "Aspect ratio"}},
-		{ FrameLimit,               { "Video", "Frame limit"}},
-		{ LogShaderPrograms,        { "Video", "Log shader programs"}},
-		{ WriteDepthBuffer,         { "Video", "Write Depth Buffer"}},
-		{ WriteColorBuffers,        { "Video", "Write Color Buffers"}},
-		{ ReadColorBuffers,         { "Video", "Read Color Buffers"}},
-		{ ReadDepthBuffer,          { "Video", "Read Depth Buffer"}},
-		{ VSync,                    { "Video", "VSync"}},
-		{ DebugOutput,              { "Video", "Debug output"}},
-		{ DebugOverlay,             { "Video", "Debug overlay"}},
-		{ LegacyBuffers,            { "Video", "Use Legacy OpenGL Buffers"}},
-		{ GPUTextureScaling,        { "Video", "Use GPU texture scaling"}},
-		{ StretchToDisplayArea,     { "Video", "Stretch To Display Area"}},
-		{ ForceHighpZ,              { "Video", "Force High Precision Z buffer"}},
-		{ StrictRenderingMode,      { "Video", "Strict Rendering Mode"}},
-		{ DisableVertexCache,       { "Video", "Disable Vertex Cache"}},
-		{ DisableOcclusionQueries,  { "Video", "Disable ZCull Occlusion Queries" }},
-		{ ForceCPUBlitEmulation,    { "Video", "Force CPU Blit" }},
-		{ DisableOnDiskShaderCache, { "Video", "Disable On-Disk Shader Cache"}},
-		{ AnisotropicFilterOverride,{ "Video", "Anisotropic Filter Override" }},
-		{ ResolutionScale,          { "Video", "Resolution Scale" }},
-		{ MinimumScalableDimension, { "Video", "Minimum Scalable Dimension" }},
-		{ D3D12Adapter,             { "Video", "D3D12", "Adapter"}},
-		{ VulkanAdapter,            { "Video", "Vulkan", "Adapter"}},
+		{ Renderer,                   { "Video", "Renderer"}},
+		{ Resolution,                 { "Video", "Resolution"}},
+		{ AspectRatio,                { "Video", "Aspect ratio"}},
+		{ FrameLimit,                 { "Video", "Frame limit"}},
+		{ LogShaderPrograms,          { "Video", "Log shader programs"}},
+		{ WriteDepthBuffer,           { "Video", "Write Depth Buffer"}},
+		{ WriteColorBuffers,          { "Video", "Write Color Buffers"}},
+		{ ReadColorBuffers,           { "Video", "Read Color Buffers"}},
+		{ ReadDepthBuffer,            { "Video", "Read Depth Buffer"}},
+		{ VSync,                      { "Video", "VSync"}},
+		{ DebugOutput,                { "Video", "Debug output"}},
+		{ DebugOverlay,               { "Video", "Debug overlay"}},
+		{ LegacyBuffers,              { "Video", "Use Legacy OpenGL Buffers"}},
+		{ GPUTextureScaling,          { "Video", "Use GPU texture scaling"}},
+		{ StretchToDisplayArea,       { "Video", "Stretch To Display Area"}},
+		{ ForceHighpZ,                { "Video", "Force High Precision Z buffer"}},
+		{ StrictRenderingMode,        { "Video", "Strict Rendering Mode"}},
+		{ DisableVertexCache,         { "Video", "Disable Vertex Cache"}},
+		{ DisableOcclusionQueries,    { "Video", "Disable ZCull Occlusion Queries"}},
+		{ DisableFIFOReordering,      { "Video", "Disable FIFO Reordering"}},
+		{ StrictTextureFlushing,      { "Video", "Strict Texture Flushing"}},
+		{ ForceCPUBlitEmulation,      { "Video", "Force CPU Blit"}},
+		{ DisableOnDiskShaderCache,   { "Video", "Disable On-Disk Shader Cache"}},
+		{ DisableVulkanMemAllocator,  { "Video", "Disable Vulkan Memory Allocator"}},
+		{ DisableAsyncShaderCompiler, { "Video", "Disable Asynchronous Shader Compiler"}},
+		{ AnisotropicFilterOverride,  { "Video", "Anisotropic Filter Override"}},
+		{ ResolutionScale,            { "Video", "Resolution Scale"}},
+		{ MinimumScalableDimension,   { "Video", "Minimum Scalable Dimension"}},
+		{ D3D12Adapter,               { "Video", "D3D12", "Adapter"}},
+		{ VulkanAdapter,              { "Video", "Vulkan", "Adapter"}},
+
+		// Performance Overlay
+		{ PerfOverlayEnabled,       { "Video", "Performance Overlay", "Enabled" } },
+		{ PerfOverlayDetailLevel,   { "Video", "Performance Overlay", "Detail level" } },
+		{ PerfOverlayPosition,      { "Video", "Performance Overlay", "Position" } },
+		{ PerfOverlayUpdateInterval,{ "Video", "Performance Overlay", "Metrics update interval (ms)" } },
+		{ PerfOverlayFontSize,      { "Video", "Performance Overlay", "Font size (px)" } },
+		{ PerfOverlayOpacity,       { "Video", "Performance Overlay", "Opacity (%)" } },
+		{ PerfOverlayMarginX,       { "Video", "Performance Overlay", "Horizontal Margin (px)" } },
+		{ PerfOverlayMarginY,       { "Video", "Performance Overlay", "Vertical Margin (px)" } },
+		{ PerfOverlayCenterX,       { "Video", "Performance Overlay", "Center Horizontally" } },
+		{ PerfOverlayCenterY,       { "Video", "Performance Overlay", "Center Vertically" } },
+
+		// Shader Loading Dialog
+		{ ShaderLoadBgEnabled,      { "Video", "Shader Loading Dialog", "Allow custom background" } },
+		{ ShaderLoadBgDarkening,    { "Video", "Shader Loading Dialog", "Darkening effect strength" } },
+		{ ShaderLoadBgBlur,         { "Video", "Shader Loading Dialog", "Blur effect strength" } },
 
 		// Audio
-		{ AudioRenderer,  { "Audio", "Renderer"}},
-		{ DumpToFile,     { "Audio", "Dump to file"}},
-		{ ConvertTo16Bit, { "Audio", "Convert to 16 bit"}},
-		{ DownmixStereo,  { "Audio", "Downmix to Stereo"}},
+		{ AudioRenderer,           { "Audio", "Renderer"}},
+		{ DumpToFile,              { "Audio", "Dump to file"}},
+		{ ConvertTo16Bit,          { "Audio", "Convert to 16 bit"}},
+		{ DownmixStereo,           { "Audio", "Downmix to Stereo"}},
+		{ MasterVolume,            { "Audio", "Master Volume"}},
+		{ EnableBuffering,         { "Audio", "Enable Buffering"}},
+		{ AudioBufferDuration,     { "Audio", "Desired Audio Buffer Duration"}},
+		{ EnableTimeStretching,    { "Audio", "Enable Time Stretching"}},
+		{ TimeStretchingThreshold, { "Audio", "Time Stretching Threshold"}},
 
 		// Input / Output
 		{ PadHandler,      { "Input/Output", "Pad"}},
@@ -254,8 +339,11 @@ private:
 		{ ConnectionStatus, { "Net", "Connection status"}},
 
 		// System
-		{ Language,       { "System", "Language"}},
-		{ EnableHostRoot, { "VFS", "Enable /host_root/"}},
+		{ Language,              { "System", "Language"}},
+		{ EnterButtonAssignment, { "System", "Enter button assignment"}},
+		{ EnableHostRoot,        { "VFS", "Enable /host_root/"}},
+		{ LimitCacheSize,        { "VFS", "Limit disk cache size"}},
+		{ MaximumCacheSize,      { "VFS", "Disk cache maximum size (MB)"}},
 
 		// Virtual File System
 		{ emulatorLocation,   { "VFS", "$(EmulatorDir)"}},
@@ -267,6 +355,5 @@ private:
 
 	YAML::Node m_defaultSettings; // The default settings as a YAML node.
 	YAML::Node m_currentSettings; // The current settings as a YAML node.
-	fs::file m_config; //! File to read/write the config settings.
-	std::string m_path;
+	std::string m_title_id;
 };

@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
 #include "Emu/Cell/PPUModule.h"
@@ -11,10 +11,15 @@
 
 #include "sceNp.h"
 #include "sceNpTrophy.h"
+#include "cellSysutil.h"
 
 #include "Utilities/StrUtil.h"
 
-logs::channel sceNpTrophy("sceNpTrophy");
+#include "Emu/Cell/lv2/sys_event.h"
+#include "Emu/Cell/lv2/sys_process.h"
+#include "Emu/Cell/lv2/sys_timer.h"
+
+LOG_CHANNEL(sceNpTrophy);
 
 TrophyNotificationBase::~TrophyNotificationBase()
 {
@@ -177,7 +182,6 @@ error_code sceNpTrophyCreateContext(vm::ptr<u32> context, vm::cptr<SceNpCommunic
 	// rough checks for further fmt::format call
 	if (commId->num > 99)
 	{
-		sceNpTrophy.error("sceNpTrophyCreateContext Invalid NP_COMM_ID");
 		return SCE_NP_TROPHY_ERROR_INVALID_NP_COMM_ID;
 	}
 	// generate trophy context name
@@ -206,7 +210,6 @@ error_code sceNpTrophyCreateContext(vm::ptr<u32> context, vm::cptr<SceNpCommunic
 	// check if exists and opened
 	if (!stream)
 	{
-		sceNpTrophy.error("sceNpTrophyCreateContext CONF does not exist");
 		return SCE_NP_TROPHY_ERROR_CONF_DOES_NOT_EXIST;
 	}
 
@@ -250,7 +253,6 @@ error_code sceNpTrophyRegisterContext(ppu_thread& ppu, u32 context, u32 handle, 
 
 	if (!ctxt)
 	{
-		sceNpTrophy.error("sceNpTrophyRegisterContext(): SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT");
 		return SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT;
 	}
 
@@ -258,14 +260,12 @@ error_code sceNpTrophyRegisterContext(ppu_thread& ppu, u32 context, u32 handle, 
 
 	if (!hndl)
 	{
-		sceNpTrophy.error("sceNpTrophyRegisterContext(): SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE");
 		return SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE;
 	}
 
 	TRPLoader trp(ctxt->trp_stream);
 	if (!trp.LoadHeader())
 	{
-		sceNpTrophy.error("sceNpTrophyRegisterContext(): SCE_NP_TROPHY_ERROR_ILLEGAL_UPDATE");
 		return SCE_NP_TROPHY_ERROR_ILLEGAL_UPDATE;
 	}
 
@@ -301,11 +301,9 @@ error_code sceNpTrophyRegisterContext(ppu_thread& ppu, u32 context, u32 handle, 
 		}
 	}
 
-	// TODO: Get the path of the current user
-	std::string trophyPath = "/dev_hdd0/home/00000001/trophy/" + ctxt->trp_name;
+	std::string trophyPath = "/dev_hdd0/home/" + Emu.GetUsr() + "/trophy/" + ctxt->trp_name;
 	if (!trp.Install(trophyPath))
 	{
-		sceNpTrophy.error("sceNpTrophyRegisterContext(): SCE_NP_TROPHY_ERROR_ILLEGAL_UPDATE");
 		return SCE_NP_TROPHY_ERROR_ILLEGAL_UPDATE;
 	}
 
@@ -316,14 +314,53 @@ error_code sceNpTrophyRegisterContext(ppu_thread& ppu, u32 context, u32 handle, 
 	ctxt->tropusr.reset(tropusr);
 
 	// TODO: Callbacks
+	// From RE-ing a game's state machine, it seems the possible order is one of the following:
+	// * Install (Not installed)  - Setup - Progress * ? - Finalize - Complete - Installed
+	// * Reinstall (Corrupted)    - Setup - Progress * ? - Finalize - Complete - Installed
+	// * Update (Required update) - Setup - Progress * ? - Finalize - Complete - Installed
+	// * Installed
+	// We will go with the easy path of Installed, and that's it.
+
+	// The callback is called once and then if it returns >= 0 the cb is called through events(coming from vsh) that are passed to the CB through cellSysutilCheckCallback
 	if (statusCb(ppu, context, SCE_NP_TROPHY_STATUS_INSTALLED, 100, 100, arg) < 0)
 	{
 		return SCE_NP_TROPHY_ERROR_PROCESSING_ABORTED;
 	}
 
-	if (statusCb(ppu, context, SCE_NP_TROPHY_STATUS_PROCESSING_COMPLETE, 100, 100, arg) < 0)
+	// This emulates vsh sending the events and ensures that not 2 events are processed at once
+	const std::pair<u32, u32> statuses[] =
 	{
-		return SCE_NP_TROPHY_ERROR_PROCESSING_ABORTED;
+		{ SCE_NP_TROPHY_STATUS_PROCESSING_SETUP, 3 },
+		{ SCE_NP_TROPHY_STATUS_PROCESSING_PROGRESS, tropusr->GetTrophiesCount() },
+		{ SCE_NP_TROPHY_STATUS_PROCESSING_FINALIZE, 4 },
+		{ SCE_NP_TROPHY_STATUS_PROCESSING_COMPLETE, 0 }
+	};
+
+	static atomic_t<u32> queued;
+
+	queued = 0;
+	for (auto status : statuses)
+	{
+		// One status max per cellSysutilCheckCallback call
+		queued += status.second;
+		for (u32 completed = 0; completed <= status.second; completed++)
+		{
+			sysutil_register_cb([=](ppu_thread& cb_ppu) -> s32
+			{
+				statusCb(cb_ppu, context, status.first, completed, status.second, arg);
+				queued--;
+				return 0;
+			});
+		}
+
+		u32 passed_time=0;
+		while (queued)
+		{
+			sys_timer_usleep(ppu, 5000);
+			passed_time += 5;
+			// If too much time passes just send the rest of the events anyway
+			if (passed_time > 300) break;
+		}
 	}
 
 	return CELL_OK;
@@ -352,7 +389,7 @@ error_code sceNpTrophyGetRequiredDiskSpace(u32 context, u32 handle, vm::ptr<u64>
 		return SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE;
 	}
 
-	if (!fs::is_dir(vfs::get("/dev_hdd0/home/00000001/trophy/" + ctxt->trp_name)))
+	if (!fs::is_dir(vfs::get("/dev_hdd0/home/" + Emu.GetUsr() + "/trophy/" + ctxt->trp_name)))
 	{
 		TRPLoader trp(ctxt->trp_stream);
 
@@ -411,8 +448,7 @@ error_code sceNpTrophyGetGameInfo(u32 context, u32 handle, vm::ptr<SceNpTrophyGa
 		return SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE;
 	}
 
-	// TODO: Get the path of the current user
-	fs::file config(vfs::get("/dev_hdd0/home/00000001/trophy/" + ctxt->trp_name + "/TROPCONF.SFM"));
+	fs::file config(vfs::get("/dev_hdd0/home/" + Emu.GetUsr() + "/trophy/" + ctxt->trp_name + "/TROPCONF.SFM"));
 
 	if (!config)
 	{
@@ -422,31 +458,44 @@ error_code sceNpTrophyGetGameInfo(u32 context, u32 handle, vm::ptr<SceNpTrophyGa
 	rXmlDocument doc;
 	doc.Read(config.to_string());
 
-	for (std::shared_ptr<rXmlNode> n = doc.GetRoot()->GetChildren(); n; n = n->GetNext())
+	auto trophy_base = doc.GetRoot();
+	if (trophy_base->GetChildren()->GetName() == "trophyconf")
 	{
+		trophy_base = trophy_base->GetChildren();
+	}
+
+	if (details)
+		memset(details.get_ptr(), 0, sizeof(SceNpTrophyGameDetails));
+	if (data)
+		memset(data.get_ptr(), 0, sizeof(SceNpTrophyGameData));
+
+	for (std::shared_ptr<rXmlNode> n = trophy_base->GetChildren(); n; n = n->GetNext())
+	{
+		const std::string n_name = n->GetName();
+
 		if (details)
 		{
-			if (n->GetName() == "title-name")
+			if (n_name == "title-name")
 			{
-				std::string titleName = n->GetNodeContent();
-				memcpy(details->title, titleName.c_str(), titleName.size());
+				strcpy_trunc(details->title, n->GetNodeContent());
+				continue;
 			}
-
-			if (n->GetName() == "title-detail")
+			else if (n_name == "title-detail")
 			{
-				std::string titleDetail = n->GetNodeContent();
-				memcpy(details->description, titleDetail.c_str(), titleDetail.size());
+				strcpy_trunc(details->description, n->GetNodeContent());
+				continue;
 			}
 		}
 
-		if (n->GetName() == "trophy")
+		if (n_name == "trophy")
 		{
 			u32 trophy_id = atoi(n->GetAttribute("id").c_str());
 
 			if (details)
 			{
 				details->numTrophies++;
-				switch (n->GetAttribute("ttype")[0]) {
+				switch (n->GetAttribute("ttype")[0])
+				{
 				case 'B': details->numBronze++;   break;
 				case 'S': details->numSilver++;   break;
 				case 'G': details->numGold++;     break;
@@ -459,7 +508,8 @@ error_code sceNpTrophyGetGameInfo(u32 context, u32 handle, vm::ptr<SceNpTrophyGa
 				if (ctxt->tropusr->GetTrophyUnlockState(trophy_id))
 				{
 					data->unlockedTrophies++;
-					switch (n->GetAttribute("ttype")[0]) {
+					switch (n->GetAttribute("ttype")[0])
+					{
 					case 'B': data->unlockedBronze++;   break;
 					case 'S': data->unlockedSilver++;   break;
 					case 'G': data->unlockedGold++;     break;
@@ -497,7 +547,7 @@ error_code sceNpTrophyUnlockTrophy(u32 context, u32 handle, s32 trophyId, vm::pt
 		return SCE_NP_TROPHY_ERROR_ALREADY_UNLOCKED;
 
 	ctxt->tropusr->UnlockTrophy(trophyId, 0, 0); // TODO
-	std::string trophyPath = "/dev_hdd0/home/00000001/trophy/" + ctxt->trp_name + "/TROPUSR.DAT";
+	std::string trophyPath = "/dev_hdd0/home/" + Emu.GetUsr() + "/trophy/" + ctxt->trp_name + "/TROPUSR.DAT";
 	ctxt->tropusr->Save(trophyPath);
 
 	if (platinumId)
@@ -519,14 +569,15 @@ error_code sceNpTrophyUnlockTrophy(u32 context, u32 handle, s32 trophyId, vm::pt
 		}
 
 		// Get icon for the notification.
-		std::string trophyIconPath = "/dev_hdd0/home/00000001/trophy/" + ctxt->trp_name + "/TROP" + padding + std::to_string(trophyId) + ".PNG";
+		std::string paddedTrophyId = padding + std::to_string(trophyId);
+		std::string trophyIconPath = "/dev_hdd0/home/" + Emu.GetUsr() + "/trophy/" + ctxt->trp_name + "/TROP" + paddedTrophyId + ".PNG";
 		fs::file trophyIconFile = fs::file(vfs::get(trophyIconPath));
 		size_t iconSize = trophyIconFile.size();
 		std::vector<uchar> trophyIconData;
 		trophyIconFile.read(trophyIconData, iconSize);
 
-		vm::ptr<SceNpTrophyDetails> details = vm::make_var(SceNpTrophyDetails());
-		vm::ptr<SceNpTrophyData> _ = vm::make_var(SceNpTrophyData());
+		vm::var<SceNpTrophyDetails> details({0});
+		vm::var<SceNpTrophyData> _({0});
 
 		s32 ret = sceNpTrophyGetTrophyInfo(context, handle, trophyId, details, _);
 		if (ret != CELL_OK)
@@ -604,13 +655,17 @@ error_code sceNpTrophyGetTrophyInfo(u32 context, u32 handle, s32 trophyId, vm::p
 		return SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE;
 	}
 
-	// TODO: Get the path of the current user
-	fs::file config(vfs::get("/dev_hdd0/home/00000001/trophy/" + ctxt->trp_name + "/TROPCONF.SFM"));
+	fs::file config(vfs::get("/dev_hdd0/home/" + Emu.GetUsr() + "/trophy/" + ctxt->trp_name + "/TROPCONF.SFM"));
 
 	if (!config)
 	{
 		return SCE_NP_TROPHY_ERROR_CONF_DOES_NOT_EXIST;
 	}
+
+	if (details)
+		memset(details.get_ptr(), 0, sizeof(SceNpTrophyDetails));
+	if (data)
+		memset(data.get_ptr(), 0, sizeof(SceNpTrophyData));
 
 	rXmlDocument doc;
 	doc.Read(config.to_string());
@@ -636,28 +691,31 @@ error_code sceNpTrophyGetTrophyInfo(u32 context, u32 handle, s32 trophyId, vm::p
 			if (details)
 			{
 				details->trophyId = trophyId;
-				switch (n->GetAttribute("ttype")[0]) {
+				switch (n->GetAttribute("ttype")[0])
+				{
 				case 'B': details->trophyGrade = SCE_NP_TROPHY_GRADE_BRONZE;   break;
 				case 'S': details->trophyGrade = SCE_NP_TROPHY_GRADE_SILVER;   break;
 				case 'G': details->trophyGrade = SCE_NP_TROPHY_GRADE_GOLD;     break;
 				case 'P': details->trophyGrade = SCE_NP_TROPHY_GRADE_PLATINUM; break;
 				}
 
-				switch (n->GetAttribute("hidden")[0]) {
+				switch (n->GetAttribute("hidden")[0])
+				{
 				case 'y': details->hidden = true;  break;
 				case 'n': details->hidden = false; break;
 				}
 
-				for (std::shared_ptr<rXmlNode> n2 = n->GetChildren(); n2; n2 = n2->GetNext()) {
-					if (n2->GetName() == "name")
+				for (std::shared_ptr<rXmlNode> n2 = n->GetChildren(); n2; n2 = n2->GetNext())
+				{
+					const std::string n2_name = n2->GetName();
+
+					if (n2_name == "name")
 					{
-						std::string name = n2->GetNodeContent();
-						memcpy(details->name, name.c_str(), std::min((size_t)SCE_NP_TROPHY_NAME_MAX_SIZE, name.length() + 1));
+						strcpy_trunc(details->name, n2->GetNodeContent());
 					}
-					if (n2->GetName() == "detail")
+					else if (n2_name == "detail")
 					{
-						std::string detail = n2->GetNodeContent();
-						memcpy(details->description, detail.c_str(), std::min((size_t)SCE_NP_TROPHY_DESCR_MAX_SIZE, detail.length() + 1));
+						strcpy_trunc(details->description, n2->GetNodeContent());
 					}
 				}
 			}
@@ -740,7 +798,7 @@ error_code sceNpTrophyGetGameIcon(u32 context, u32 handle, vm::ptr<void> buffer,
 		return SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE;
 	}
 
-	fs::file icon_file(vfs::get("/dev_hdd0/home/00000001/trophy/" + ctxt->trp_name + "/ICON0.PNG"));
+	fs::file icon_file(vfs::get("/dev_hdd0/home/" + Emu.GetUsr() + "/trophy/" + ctxt->trp_name + "/ICON0.PNG"));
 
 	if (!icon_file)
 	{
@@ -793,7 +851,7 @@ error_code sceNpTrophyGetTrophyIcon(u32 context, u32 handle, s32 trophyId, vm::p
 		return hidden ? SCE_NP_TROPHY_ERROR_HIDDEN : SCE_NP_TROPHY_ERROR_LOCKED;
 	}
 
-	fs::file icon_file(vfs::get("/dev_hdd0/home/00000001/trophy/" + ctxt->trp_name + fmt::format("/TROP%03d.PNG", trophyId)));
+	fs::file icon_file(vfs::get("/dev_hdd0/home/" + Emu.GetUsr() + "/trophy/" + ctxt->trp_name + fmt::format("/TROP%03d.PNG", trophyId)));
 
 	if (!icon_file)
 	{

@@ -114,12 +114,18 @@ struct lv2_obj
 	}
 
 	// Remove the current thread from the scheduling queue, register timeout
-	static void sleep_timeout(named_thread&, u64 timeout);
+	static void sleep_timeout(cpu_thread&, u64 timeout);
 
 	static void sleep(cpu_thread& thread, u64 timeout = 0)
 	{
 		vm::temporary_unlock(thread);
 		sleep_timeout(thread, timeout);
+	}
+
+	static void yield(cpu_thread& thread)
+	{
+		vm::temporary_unlock(thread);
+		awake(thread, -4);
 	}
 
 	// Schedule the thread
@@ -209,7 +215,7 @@ struct lv2_obj
 
 private:
 	// Scheduler mutex
-	static semaphore<> g_mutex;
+	static shared_mutex g_mutex;
 
 	// Scheduler queue for active PPU threads
 	static std::deque<class ppu_thread*> g_ppu;
@@ -218,7 +224,7 @@ private:
 	static std::deque<class cpu_thread*> g_pending;
 
 	// Scheduler queue for timeouts (wait until -> thread)
-	static std::deque<std::pair<u64, named_thread*>> g_waiting;
+	static std::deque<std::pair<u64, class cpu_thread*>> g_waiting;
 
 	static void schedule_all();
 };

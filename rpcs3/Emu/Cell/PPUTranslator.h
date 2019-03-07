@@ -15,7 +15,7 @@ class PPUTranslator final : public cpu_translator
 	std::map<u64, const ppu_reloc*> m_relocs;
 
 	// Attributes for function calls which are "pure" and may be optimized away if their results are unused
-	const llvm::AttributeSet m_pure_attr;
+	const llvm::AttributeList m_pure_attr;
 
 	// LLVM function
 	llvm::Function* m_function;
@@ -46,10 +46,6 @@ class PPUTranslator final : public cpu_translator
 
 	// Callable functions
 	llvm::GlobalVariable* m_call;
-
-	// Main block
-	llvm::BasicBlock* m_body;
-	llvm::BasicBlock* m_entry;
 
 	// Thread context struct
 	llvm::StructType* m_thread_type;
@@ -297,23 +293,23 @@ public:
 
 	// Call a function with attribute list
 	template<typename... Args>
-	llvm::CallInst* Call(llvm::Type* ret, llvm::AttributeSet attr, llvm::StringRef name, Args... args)
+	llvm::CallInst* Call(llvm::Type* ret, llvm::AttributeList attr, llvm::StringRef name, Args... args)
 	{
 		// Call the function
-		return m_ir->CreateCall(m_module->getOrInsertFunction(name, llvm::FunctionType::get(ret, {args->getType()...}, false), attr), {args...});
+		return m_ir->CreateCall(m_module->getOrInsertFunction(name, attr, ret, args->getType()...), {args...});
 	}
 
 	// Call a function
 	template<typename... Args>
 	llvm::CallInst* Call(llvm::Type* ret, llvm::StringRef name, Args... args)
 	{
-		return Call(ret, llvm::AttributeSet{}, name, args...);
+		return Call(ret, llvm::AttributeList{}, name, args...);
 	}
 
 	// Handle compilation errors
 	void CompilationError(const std::string& error);
 
-	PPUTranslator(llvm::LLVMContext& context, llvm::Module* module, const ppu_module& info);
+	PPUTranslator(llvm::LLVMContext& context, llvm::Module* module, const ppu_module& info, bool ssse3);
 	~PPUTranslator();
 
 	// Get thread context struct type

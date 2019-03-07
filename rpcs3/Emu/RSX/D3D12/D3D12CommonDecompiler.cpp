@@ -1,4 +1,4 @@
-#ifdef _MSC_VER
+﻿#ifdef _MSC_VER
 #include "stdafx.h"
 #include "stdafx_d3d12.h"
 #include "D3D12CommonDecompiler.h"
@@ -25,7 +25,7 @@ std::string getFunctionImp(FUNCTION f)
 	switch (f)
 	{
 	default:
-		abort();
+		fmt::throw_exception("Unsupported program function %d", (u32)f);
 	case FUNCTION::FUNCTION_DP2:
 		return "dot($0.xy, $1.xy).xxxx";
 	case FUNCTION::FUNCTION_DP2A:
@@ -114,6 +114,8 @@ std::string compareFunctionImp(COMPARE f, const std::string &Op0, const std::str
 
 void insert_d3d12_legacy_function(std::ostream& OS, bool is_fragment_program)
 {
+	OS << "#define _select lerp\n\n";
+
 	OS << "float4 lit_legacy(float4 val)";
 	OS << "{\n";
 	OS << "	float4 clamped_val = val;\n";

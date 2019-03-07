@@ -3,7 +3,7 @@
 
 
 // Return codes
-enum
+enum CellSaveDataError : u32
 {
 	CELL_SAVEDATA_ERROR_CBRESULT        = 0x8002b401,
 	CELL_SAVEDATA_ERROR_ACCESS_ERROR    = 0x8002b402,
@@ -92,8 +92,23 @@ enum
 	CELL_SAVEDATA_RECREATE_YES             = 2,
 	CELL_SAVEDATA_RECREATE_YES_RESET_OWNER = 3,
 	CELL_SAVEDATA_RECREATE_MASK            = 0xffff,
+
+	// Version
+	CELL_SAVEDATA_VERSION_OLD = 0,
+	CELL_SAVEDATA_VERSION_420 = 1,
+
+	// Error Dialog
+	CELL_SAVEDATA_ERRDIALOG_NONE     = 0,
+	CELL_SAVEDATA_ERRDIALOG_ALWAYS   = 1,
+	CELL_SAVEDATA_ERRDIALOG_NOREPEAT = 2,
 };
 
+// CellSaveDataListNewData::iconPosition
+enum : u32
+{
+	CELL_SAVEDATA_ICONPOS_HEAD = 0,
+	CELL_SAVEDATA_ICONPOS_TAIL = 1,
+};
 
 // Datatypes
 struct CellSaveDataSetList
@@ -235,7 +250,7 @@ struct CellSaveDataFileSet
 	be_t<u32> fileOperation;
 	vm::bptr<void> reserved;
 	be_t<u32> fileType;
-	u8 secureFileId[CELL_SAVEDATA_SECUREFILEID_SIZE];
+	be_t<v128, 1> secureFileId;
 	vm::bptr<char> fileName;
 	be_t<u32> fileOffset;
 	be_t<u32> fileSize;

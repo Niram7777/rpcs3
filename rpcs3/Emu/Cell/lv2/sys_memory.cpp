@@ -1,46 +1,43 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
+#include "Utilities/VirtualMemory.h"
+#include "Emu/IdManager.h"
 #include "sys_memory.h"
 
+LOG_CHANNEL(sys_memory);
 
+lv2_memory_alloca::lv2_memory_alloca(u32 size, u32 align, u64 flags, const std::shared_ptr<lv2_memory_container>& ct)
+	: size(size)
+	, align(align)
+	, flags(flags)
+	, ct(ct)
+	, shm(std::make_shared<utils::shm>(size))
+{
+}
 
-logs::channel sys_memory("sys_memory");
+// Todo: fix order of error checks
 
 error_code sys_memory_allocate(u32 size, u64 flags, vm::ptr<u32> alloc_addr)
 {
 	sys_memory.warning("sys_memory_allocate(size=0x%x, flags=0x%llx, alloc_addr=*0x%x)", size, flags, alloc_addr);
 
 	// Check allocation size
-	switch (flags)
-	{
-	case 0:		//handle "default" value, issue 2510
-	case SYS_MEMORY_PAGE_SIZE_1M:
-	{
-		if (size % 0x100000)
-		{
-			return CELL_EALIGN;
-		}
+	const u32 align =
+		flags == SYS_MEMORY_PAGE_SIZE_1M ? 0x100000 :
+		flags == SYS_MEMORY_PAGE_SIZE_64K ? 0x10000 :
+		flags == 0 ? 0x100000 : 0;
 
-		break;
+	if (!align)
+	{
+		return {CELL_EINVAL, flags};
 	}
 
-	case SYS_MEMORY_PAGE_SIZE_64K:
+	if (size % align)
 	{
-		if (size % 0x10000)
-		{
-			return CELL_EALIGN;
-		}
-
-		break;
-	}
-
-	default:
-	{
-		return CELL_EINVAL;
-	}
+		return {CELL_EALIGN, size};
 	}
 
 	// Get "default" memory container
-	const auto dct = fxm::get_always<lv2_memory_container>();
+	const auto dct = fxm::get<lv2_memory_container>();
 
 	// Try to get "physical memory"
 	if (!dct->take(size))
@@ -48,10 +45,24 @@ error_code sys_memory_allocate(u32 size, u64 flags, vm::ptr<u32> alloc_addr)
 		return CELL_ENOMEM;
 	}
 
-	// Allocate memory, write back the start address of the allocated area
-	*alloc_addr = verify(HERE, vm::alloc(size, vm::user_space, flags == SYS_MEMORY_PAGE_SIZE_1M ? 0x100000 : 0x10000));
+	if (const auto area = vm::get(align == 0x10000 ? vm::user64k : vm::user1m, 0, ::align(size, 0x10000000)))
+	{
+		if (u32 addr = area->alloc(size, align))
+		{
+			if (alloc_addr)
+			{
+				*alloc_addr = addr;
+				return CELL_OK;
+			}
 
-	return CELL_OK;
+			// Dealloc using the syscall
+			sys_memory_free(addr);
+			return CELL_EFAULT;
+		}
+	}
+
+	dct->used -= size;
+	return CELL_ENOMEM;
 }
 
 error_code sys_memory_allocate_from_container(u32 size, u32 cid, u64 flags, vm::ptr<u32> alloc_addr)
@@ -59,32 +70,19 @@ error_code sys_memory_allocate_from_container(u32 size, u32 cid, u64 flags, vm::
 	sys_memory.warning("sys_memory_allocate_from_container(size=0x%x, cid=0x%x, flags=0x%llx, alloc_addr=*0x%x)", size, cid, flags, alloc_addr);
 
 	// Check allocation size
-	switch (flags)
-	{
-	case SYS_MEMORY_PAGE_SIZE_1M:
-	{
-		if (size % 0x100000)
-		{
-			return CELL_EALIGN;
-		}
+	const u32 align =
+		flags == SYS_MEMORY_PAGE_SIZE_1M ? 0x100000 :
+		flags == SYS_MEMORY_PAGE_SIZE_64K ? 0x10000 :
+		flags == 0 ? 0x100000 : 0;
 
-		break;
+	if (!align)
+	{
+		return {CELL_EINVAL, flags};
 	}
 
-	case SYS_MEMORY_PAGE_SIZE_64K:
+	if (size % align)
 	{
-		if (size % 0x10000)
-		{
-			return CELL_EALIGN;
-		}
-
-		break;
-	}
-
-	default:
-	{
-		return CELL_EINVAL;
-	}
+		return {CELL_EALIGN, size};
 	}
 
 	const auto ct = idm::get<lv2_memory_container>(cid, [&](lv2_memory_container& ct) -> CellError
@@ -108,37 +106,84 @@ error_code sys_memory_allocate_from_container(u32 size, u32 cid, u64 flags, vm::
 		return ct.ret;
 	}
 
-	// Allocate memory, write back the start address of the allocated area, use cid as the supplementary info
-	*alloc_addr = verify(HERE, vm::alloc(size, vm::user_space, flags == SYS_MEMORY_PAGE_SIZE_1M ? 0x100000 : 0x10000, cid));
+	// Create phantom memory object
+	const auto mem = idm::make_ptr<lv2_memory_alloca>(size, align, flags, ct.ptr);
 
-	return CELL_OK;
+	if (const auto area = vm::get(align == 0x10000 ? vm::user64k : vm::user1m, 0, ::align(size, 0x10000000)))
+	{
+		if (u32 addr = area->alloc(size, mem->align, &mem->shm))
+		{
+			if (alloc_addr)
+			{
+				*alloc_addr = addr;
+				return CELL_OK;
+			}
+
+			// Dealloc using the syscall
+			sys_memory_free(addr);
+			return CELL_EFAULT;
+		}
+	}
+
+	idm::remove<lv2_memory_alloca>(idm::last_id());
+	ct->used -= size;
+	return CELL_ENOMEM;
 }
 
 error_code sys_memory_free(u32 addr)
 {
 	sys_memory.warning("sys_memory_free(addr=0x%x)", addr);
 
-	const auto area = vm::get(vm::user_space);
+	const auto area = vm::get(vm::any, addr);
 
-	verify(HERE), area;
+	if (!area || (area->flags & 3) != 1)
+	{
+		return {CELL_EINVAL, addr};
+	}
+
+	const auto shm = area->get(addr);
+
+	if (!shm.second)
+	{
+		return {CELL_EINVAL, addr};
+	}
+
+	// Retrieve phantom memory object
+	const auto mem = idm::select<lv2_memory_alloca>([&](u32 id, lv2_memory_alloca& mem) -> u32
+	{
+		if (mem.shm.get() == shm.second.get())
+		{
+			return id;
+		}
+
+		return 0;
+	});
+
+	if (!mem)
+	{
+		// Deallocate memory (simple)
+		if (!area->dealloc(addr))
+		{
+			return {CELL_EINVAL, addr};
+		}
+
+		// Return "physical memory" to the default container
+		fxm::get<lv2_memory_container>()->used -= shm.second->size();
+
+		return CELL_OK;
+	}
 
 	// Deallocate memory
-	u32 cid, size = area->dealloc(addr, nullptr, &cid);
-
-	if (!size)
+	if (!area->dealloc(addr, &shm.second))
 	{
-		return CELL_EINVAL;
+		return {CELL_EINVAL, addr};
 	}
 
 	// Return "physical memory"
-	if (cid == 0)
-	{
-		fxm::get<lv2_memory_container>()->used -= size;
-	}
-	else if (const auto ct = idm::get<lv2_memory_container>(cid))
-	{
-		ct->used -= size;
-	}
+	mem->ct->used -= mem->size;
+
+	// Remove phantom memory object
+	verify(HERE), idm::remove<lv2_memory_alloca>(mem.ret);
 
 	return CELL_OK;
 }
@@ -181,7 +226,7 @@ error_code sys_memory_get_user_memory_size(vm::ptr<sys_memory_info_t> mem_info)
 	sys_memory.warning("sys_memory_get_user_memory_size(mem_info=*0x%x)", mem_info);
 
 	// Get "default" memory container
-	const auto dct = fxm::get_always<lv2_memory_container>();
+	const auto dct = fxm::get<lv2_memory_container>();
 
 	mem_info->total_user_memory = dct->size;
 	mem_info->available_user_memory = dct->size - dct->used;
@@ -207,7 +252,7 @@ error_code sys_memory_container_create(vm::ptr<u32> cid, u32 size)
 		return CELL_ENOMEM;
 	}
 
-	const auto dct = fxm::get_always<lv2_memory_container>();
+	const auto dct = fxm::get<lv2_memory_container>();
 
 	// Try to obtain "physical memory" from the default container
 	if (!dct->take(size))
@@ -264,11 +309,7 @@ error_code sys_memory_container_get_size(vm::ptr<sys_memory_info_t> mem_info, u3
 	}
 
 	mem_info->total_user_memory = ct->size; // Total container memory
-	// Available container memory, minus a hidden 'buffer'
-	// This buffer seems to be used by the PS3 OS for c style 'mallocs'
-	// Todo: Research this more, even though we dont use this buffer, it helps out games when calculating
-	//	     expected memory they can use allowing them to boot
-	mem_info->available_user_memory = ct->size - ct->used - 0x1000000;
+	mem_info->available_user_memory = ct->size - ct->used; // Available container memory
 
 	return CELL_OK;
 }

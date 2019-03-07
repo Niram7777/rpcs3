@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "stdafx.h"
 #include <exception>
@@ -8,29 +8,46 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include <variant>
 
-#include "Utilities/variant.hpp"
-#include "Emu/RSX/GSRender.h"
-#include "Emu/System.h"
-#include "VulkanAPI.h"
-#include "../GCM.h"
-#include "../Common/TextureUtils.h"
-#include "../Common/ring_buffer_helper.h"
-#include "../Common/GLSLCommon.h"
-#include "../rsx_cache.h"
-
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
 #include <X11/Xutil.h>
 #endif
 
-#define DESCRIPTOR_MAX_DRAW_CALLS 4096
+#include "Emu/RSX/GSRender.h"
+#include "Emu/System.h"
+#include "VulkanAPI.h"
+#include "VKCommonDecompiler.h"
+#include "../GCM.h"
+#include "../Common/TextureUtils.h"
+#include "../Common/ring_buffer_helper.h"
+#include "../rsx_cache.h"
 
-#define VERTEX_BUFFERS_FIRST_BIND_SLOT 3
-#define FRAGMENT_CONSTANT_BUFFERS_BIND_SLOT 2
-#define VERTEX_CONSTANT_BUFFERS_BIND_SLOT 1
-#define SCALE_OFFSET_BIND_SLOT 0
-#define TEXTURES_FIRST_BIND_SLOT 19
-#define VERTEX_TEXTURES_FIRST_BIND_SLOT 35 //19+16
+#include "3rdparty/GPUOpen/include/vk_mem_alloc.h"
+
+#ifdef __APPLE__
+#define VK_DISABLE_COMPONENT_SWIZZLE 1
+#else
+#define VK_DISABLE_COMPONENT_SWIZZLE 0
+#endif
+
+#define DESCRIPTOR_MAX_DRAW_CALLS 4096
+#define OCCLUSION_MAX_POOL_SIZE 8192
+
+#define VERTEX_PARAMS_BIND_SLOT 0
+#define VERTEX_LAYOUT_BIND_SLOT 1
+#define VERTEX_CONSTANT_BUFFERS_BIND_SLOT 2
+#define FRAGMENT_CONSTANT_BUFFERS_BIND_SLOT 3
+#define FRAGMENT_STATE_BIND_SLOT 4
+#define FRAGMENT_TEXTURE_PARAMS_BIND_SLOT 5
+#define VERTEX_BUFFERS_FIRST_BIND_SLOT 6
+#define TEXTURES_FIRST_BIND_SLOT 8
+#define VERTEX_TEXTURES_FIRST_BIND_SLOT 24 //8+16
+
+#define VK_NUM_DESCRIPTOR_BINDINGS (VERTEX_TEXTURES_FIRST_BIND_SLOT + 4)
+
+#define FRAME_PRESENT_TIMEOUT 1000000ull // 1 second
+#define GENERAL_WAIT_TIMEOUT  100000ull  // 100ms
 
 namespace rsx
 {
@@ -56,47 +73,91 @@ namespace vk
 
 	//VkAllocationCallbacks default_callbacks();
 
+	enum driver_vendor
+	{
+		unknown,
+		AMD,
+		NVIDIA,
+		RADV
+	};
+
 	class context;
 	class render_device;
 	class swap_chain_image;
 	class physical_device;
 	class command_buffer;
 	struct image;
+	struct buffer;
+	struct data_heap;
+	class mem_allocator_base;
+	struct memory_type_mapping;
+	struct gpu_formats_support;
 
-	vk::context *get_current_thread_ctx();
+	const vk::context *get_current_thread_ctx();
 	void set_current_thread_ctx(const vk::context &ctx);
 
-	vk::render_device *get_current_renderer();
+	const vk::render_device *get_current_renderer();
 	void set_current_renderer(const vk::render_device &device);
 
+	mem_allocator_base *get_current_mem_allocator();
+
 	//Compatibility workarounds
-	bool emulate_primitive_restart();
-	bool force_32bit_index_buffer();
+	bool emulate_primitive_restart(rsx::primitive_type type);
 	bool sanitize_fp_values();
+	bool fence_reset_disabled();
+	VkFlags get_heap_compatible_buffer_types();
+	driver_vendor get_driver_vendor();
 
 	VkComponentMapping default_component_map();
 	VkComponentMapping apply_swizzle_remap(const std::array<VkComponentSwizzle, 4>& base_remap, const std::pair<std::array<u8, 4>, std::array<u8, 4>>& remap_vector);
 	VkImageSubresource default_image_subresource();
 	VkImageSubresourceRange get_image_subresource_range(uint32_t base_layer, uint32_t base_mip, uint32_t layer_count, uint32_t level_count, VkImageAspectFlags aspect);
+	VkImageAspectFlags get_aspect_flags(VkFormat format);
 
 	VkSampler null_sampler();
 	VkImageView null_image_view(vk::command_buffer&);
+	image* get_typeless_helper(VkFormat format, u32 requested_width, u32 requested_height);
+	buffer* get_scratch_buffer();
+
+	memory_type_mapping get_memory_mapping(const physical_device& dev);
+	gpu_formats_support get_optimal_tiling_supported_formats(const physical_device& dev);
 
 	//Sync helpers around vkQueueSubmit
 	void acquire_global_submit_lock();
 	void release_global_submit_lock();
 
+	template<class T>
+	T* get_compute_task();
+	void reset_compute_tasks();
+
 	void destroy_global_resources();
 
-	void change_image_layout(VkCommandBuffer cmd, VkImage image, VkImageLayout current_layout, VkImageLayout new_layout, VkImageSubresourceRange range);
-	void change_image_layout(VkCommandBuffer cmd, vk::image *image, VkImageLayout new_layout, VkImageSubresourceRange range);
-	void change_image_layout(VkCommandBuffer cmd, vk::image *image, VkImageLayout new_layout);
-	void copy_image(VkCommandBuffer cmd, VkImage &src, VkImage &dst, VkImageLayout srcLayout, VkImageLayout dstLayout, u32 width, u32 height, u32 mipmaps, VkImageAspectFlagBits aspect);
-	void copy_scaled_image(VkCommandBuffer cmd, VkImage &src, VkImage &dst, VkImageLayout srcLayout, VkImageLayout dstLayout, u32 src_x_offset, u32 src_y_offset, u32 src_width, u32 src_height, u32 dst_x_offset, u32 dst_y_offset, u32 dst_width, u32 dst_height, u32 mipmaps, VkImageAspectFlagBits aspect, bool compatible_formats);
+	/**
+	* Allocate enough space in upload_buffer and write all mipmap/layer data into the subbuffer.
+	* Then copy all layers into dst_image.
+	* dst_image must be in TRANSFER_DST_OPTIMAL layout and upload_buffer have TRANSFER_SRC_BIT usage flag.
+	*/
+	void copy_mipmaped_image_using_buffer(VkCommandBuffer cmd, vk::image* dst_image,
+		const std::vector<rsx_subresource_layout>& subresource_layout, int format, bool is_swizzled, u16 mipmap_count,
+		VkImageAspectFlags flags, vk::data_heap &upload_heap);
 
-	VkFormat get_compatible_sampler_format(u32 format);
-	VkFormat get_compatible_srgb_format(VkFormat rgb_format);
-	u8 get_format_texel_width(const VkFormat format);
+	//Other texture management helpers
+	void change_image_layout(VkCommandBuffer cmd, VkImage image, VkImageLayout current_layout, VkImageLayout new_layout, const VkImageSubresourceRange& range);
+	void change_image_layout(VkCommandBuffer cmd, vk::image *image, VkImageLayout new_layout, const VkImageSubresourceRange& range);
+	void change_image_layout(VkCommandBuffer cmd, vk::image *image, VkImageLayout new_layout);
+
+	void copy_image_typeless(const command_buffer &cmd, const image *src, const image *dst, const areai& src_rect, const areai& dst_rect,
+		u32 mipmaps, VkImageAspectFlags src_aspect, VkImageAspectFlags dst_aspect,
+		VkImageAspectFlags src_transfer_mask = 0xFF, VkImageAspectFlags dst_transfer_mask = 0xFF);
+
+	void copy_image(VkCommandBuffer cmd, VkImage src, VkImage dst, VkImageLayout srcLayout, VkImageLayout dstLayout,
+			const areai& src_rect, const areai& dst_rect, u32 mipmaps, VkImageAspectFlags src_aspect, VkImageAspectFlags dst_aspect,
+			VkImageAspectFlags src_transfer_mask = 0xFF, VkImageAspectFlags dst_transfer_mask = 0xFF);
+
+	void copy_scaled_image(VkCommandBuffer cmd, VkImage src, VkImage dst, VkImageLayout srcLayout, VkImageLayout dstLayout,
+			u32 src_x_offset, u32 src_y_offset, u32 src_width, u32 src_height, u32 dst_x_offset, u32 dst_y_offset, u32 dst_width, u32 dst_height, u32 mipmaps,
+			VkImageAspectFlags aspect, bool compatible_formats, VkFilter filter = VK_FILTER_LINEAR, VkFormat src_format = VK_FORMAT_UNDEFINED, VkFormat dst_format = VK_FORMAT_UNDEFINED);
+
 	std::pair<VkFormat, VkComponentMapping> get_compatible_surface_format(rsx::surface_color_format color_format);
 	size_t get_render_pass_location(VkFormat color_surface_format, VkFormat depth_stencil_format, u8 color_surface_count);
 
@@ -104,6 +165,10 @@ namespace vk
 	void insert_texture_barrier(VkCommandBuffer cmd, VkImage image, VkImageLayout layout, VkImageSubresourceRange range);
 	void insert_texture_barrier(VkCommandBuffer cmd, vk::image *image);
 
+	void insert_buffer_memory_barrier(VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize length,
+			VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage, VkAccessFlags src_mask, VkAccessFlags dst_mask);
+
+	//Manage 'uininterruptible' state where secondary operations (e.g violation handlers) will have to wait
 	void enter_uninterruptible();
 	void leave_uninterruptible();
 	bool is_uninterruptible();
@@ -113,6 +178,10 @@ namespace vk
 	const u64 get_current_frame_id();
 	const u64 get_last_completed_frame_id();
 
+	// Fence reset with driver workarounds in place
+	void reset_fence(VkFence *pFence);
+	VkResult wait_for_fence(VkFence pFence, u64 timeout = 0ull);
+
 	void die_with_error(const char* faulting_addr, VkResult error_code);
 
 	struct memory_type_mapping
@@ -121,7 +190,207 @@ namespace vk
 		uint32_t device_local;
 	};
 
-	memory_type_mapping get_memory_mapping(const physical_device& dev);
+	struct gpu_formats_support
+	{
+		bool d24_unorm_s8;
+		bool d32_sfloat_s8;
+		bool bgra8_linear;
+	};
+
+	// Memory Allocator - base class
+
+	class mem_allocator_base
+	{
+	public:
+		using mem_handle_t = void *;
+
+		mem_allocator_base(VkDevice dev, VkPhysicalDevice /*pdev*/) : m_device(dev) {}
+		virtual ~mem_allocator_base() {}
+
+		virtual void destroy() = 0;
+
+		virtual mem_handle_t alloc(u64 block_sz, u64 alignment, uint32_t memory_type_index) = 0;
+		virtual void free(mem_handle_t mem_handle) = 0;
+		virtual void *map(mem_handle_t mem_handle, u64 offset, u64 size) = 0;
+		virtual void unmap(mem_handle_t mem_handle) = 0;
+		virtual VkDeviceMemory get_vk_device_memory(mem_handle_t mem_handle) = 0;
+		virtual u64 get_vk_device_memory_offset(mem_handle_t mem_handle) = 0;
+
+	protected:
+		VkDevice m_device;
+	private:
+	};
+
+	// Memory Allocator - Vulkan Memory Allocator 
+	// https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
+
+	class mem_allocator_vma : public mem_allocator_base
+	{
+	public:
+		mem_allocator_vma(VkDevice dev, VkPhysicalDevice pdev) : mem_allocator_base(dev, pdev)
+		{
+			VmaAllocatorCreateInfo allocatorInfo = {};
+			allocatorInfo.physicalDevice = pdev;
+			allocatorInfo.device = dev;
+
+			vmaCreateAllocator(&allocatorInfo, &m_allocator);
+		}
+
+		~mem_allocator_vma() {};
+
+		void destroy() override
+		{
+			vmaDestroyAllocator(m_allocator);
+		}
+
+		mem_handle_t alloc(u64 block_sz, u64 alignment, uint32_t memory_type_index) override
+		{
+			VmaAllocation vma_alloc;
+			VkMemoryRequirements mem_req = {};
+			VmaAllocationCreateInfo create_info = {};
+
+			mem_req.memoryTypeBits = 1u << memory_type_index;
+			mem_req.size = block_sz;
+			mem_req.alignment = alignment;
+			create_info.memoryTypeBits = 1u << memory_type_index;
+			CHECK_RESULT(vmaAllocateMemory(m_allocator, &mem_req, &create_info, &vma_alloc, nullptr));
+			return vma_alloc;
+		}
+
+		void free(mem_handle_t mem_handle) override
+		{
+			vmaFreeMemory(m_allocator, static_cast<VmaAllocation>(mem_handle));
+		}
+
+		void *map(mem_handle_t mem_handle, u64 offset, u64 /*size*/) override
+		{
+			void *data = nullptr;
+
+			CHECK_RESULT(vmaMapMemory(m_allocator, static_cast<VmaAllocation>(mem_handle), &data));
+
+			// Add offset
+			data = static_cast<u8 *>(data) + offset;
+			return data;
+		}
+
+		void unmap(mem_handle_t mem_handle) override
+		{
+			vmaUnmapMemory(m_allocator, static_cast<VmaAllocation>(mem_handle));
+		}
+
+		VkDeviceMemory get_vk_device_memory(mem_handle_t mem_handle) override
+		{
+			VmaAllocationInfo alloc_info;
+
+			vmaGetAllocationInfo(m_allocator, static_cast<VmaAllocation>(mem_handle), &alloc_info);
+			return alloc_info.deviceMemory;
+		}
+
+		u64 get_vk_device_memory_offset(mem_handle_t mem_handle) override
+		{
+			VmaAllocationInfo alloc_info;
+
+			vmaGetAllocationInfo(m_allocator, static_cast<VmaAllocation>(mem_handle), &alloc_info);
+			return alloc_info.offset;
+		}
+
+	private:
+		VmaAllocator m_allocator;
+	};
+
+	// Memory Allocator - built-in Vulkan device memory allocate/free
+
+	class mem_allocator_vk : public mem_allocator_base
+	{
+	public:
+		mem_allocator_vk(VkDevice dev, VkPhysicalDevice pdev) : mem_allocator_base(dev, pdev) {};
+		~mem_allocator_vk() {};
+
+		void destroy() override {};
+
+		mem_handle_t alloc(u64 block_sz, u64 /*alignment*/, uint32_t memory_type_index) override
+		{
+			VkDeviceMemory memory;
+			VkMemoryAllocateInfo info = {};
+			info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+			info.allocationSize = block_sz;
+			info.memoryTypeIndex = memory_type_index;
+
+			CHECK_RESULT(vkAllocateMemory(m_device, &info, nullptr, &memory));
+			return memory;
+		}
+
+		void free(mem_handle_t mem_handle) override
+		{
+			vkFreeMemory(m_device, (VkDeviceMemory)mem_handle, nullptr);
+		}
+
+		void *map(mem_handle_t mem_handle, u64 offset, u64 size) override
+		{
+			void *data = nullptr;
+			CHECK_RESULT(vkMapMemory(m_device, (VkDeviceMemory)mem_handle, offset, std::max<u64>(size, 1u), 0, &data));
+			return data;
+		}
+
+		void unmap(mem_handle_t mem_handle) override
+		{
+			vkUnmapMemory(m_device, (VkDeviceMemory)mem_handle);
+		}
+
+		VkDeviceMemory get_vk_device_memory(mem_handle_t mem_handle) override
+		{
+			return (VkDeviceMemory)mem_handle;
+		}
+
+		u64 get_vk_device_memory_offset(mem_handle_t /*mem_handle*/) override
+		{
+			return 0;
+		}
+
+	private:
+	};
+
+	struct memory_block
+	{
+		memory_block(VkDevice dev, u64 block_sz, u64 alignment, uint32_t memory_type_index) : m_device(dev)
+		{
+			m_mem_allocator = get_current_mem_allocator();
+			m_mem_handle = m_mem_allocator->alloc(block_sz, alignment, memory_type_index);
+		}
+
+		~memory_block()
+		{
+			m_mem_allocator->free(m_mem_handle);
+		}
+
+		VkDeviceMemory get_vk_device_memory()
+		{
+			return m_mem_allocator->get_vk_device_memory(m_mem_handle);
+		}
+
+		u64 get_vk_device_memory_offset()
+		{
+			return m_mem_allocator->get_vk_device_memory_offset(m_mem_handle);
+		}
+
+		void *map(u64 offset, u64 size)
+		{
+			return m_mem_allocator->map(m_mem_handle, offset, size);
+		}
+
+		void unmap()
+		{
+			m_mem_allocator->unmap(m_mem_handle);
+		}
+
+		memory_block(const memory_block&) = delete;
+		memory_block(memory_block&&) = delete;
+
+	private:
+		VkDevice m_device;
+		vk::mem_allocator_base* m_mem_allocator;
+		mem_allocator_base::mem_handle_t m_mem_handle;
+	};
 
 	class physical_device
 	{
@@ -140,11 +409,59 @@ namespace vk
 			dev = pdev;
 			vkGetPhysicalDeviceProperties(pdev, &props);
 			vkGetPhysicalDeviceMemoryProperties(pdev, &memory_properties);
+
+			LOG_NOTICE(RSX, "Found vulkan-compatible GPU: '%s' running on driver %s", get_name(), get_driver_version());
 		}
 
-		std::string name() const
+		std::string get_name() const
 		{
 			return props.deviceName;
+		}
+
+		driver_vendor get_driver_vendor() const
+		{
+			const auto gpu_name = get_name();
+			if (gpu_name.find("Radeon") != std::string::npos)
+			{
+				return driver_vendor::AMD;
+			}
+
+			if (gpu_name.find("NVIDIA") != std::string::npos || gpu_name.find("GeForce") != std::string::npos)
+			{
+				return driver_vendor::NVIDIA;
+			}
+
+			if (gpu_name.find("RADV") != std::string::npos)
+			{
+				return driver_vendor::RADV;
+			}
+
+			return driver_vendor::unknown;
+		}
+
+		std::string get_driver_version() const
+		{
+			switch (get_driver_vendor())
+			{
+			case driver_vendor::NVIDIA:
+			{
+				// 10 + 8 + 8 + 6
+				const auto major_version = VK_VERSION_MAJOR(props.driverVersion);
+				const auto minor_version = (props.driverVersion >> 14) & 0xff;
+				const auto patch = (props.driverVersion >> 6) & 0xff;
+				const auto revision = (props.driverVersion & 0x3f);
+
+				return fmt::format("%u.%u.%u.%u", major_version, minor_version, patch, revision);
+			}
+			default:
+			{
+				// 10 + 10 + 12 (standard vulkan encoding created with VK_MAKE_VERSION)
+				return fmt::format("%u.%u.%u",
+					VK_VERSION_MAJOR(props.driverVersion),
+					VK_VERSION_MINOR(props.driverVersion),
+					VK_VERSION_PATCH(props.driverVersion));
+			}
+			}
 		}
 
 		uint32_t get_queue_count() const
@@ -178,6 +495,11 @@ namespace vk
 			return memory_properties;
 		}
 
+		VkPhysicalDeviceLimits get_limits() const
+		{
+			return props.limits;
+		}
+
 		operator VkPhysicalDevice() const
 		{
 			return dev;
@@ -188,13 +510,18 @@ namespace vk
 	{
 		physical_device *pgpu = nullptr;
 		memory_type_mapping memory_map{};
+		gpu_formats_support m_formats_support{};
+		std::unique_ptr<mem_allocator_base> m_allocator;
 		VkDevice dev = VK_NULL_HANDLE;
 
 	public:
 		render_device()
 		{}
 
-		render_device(vk::physical_device &pdev, uint32_t graphics_queue_idx)
+		~render_device()
+		{}
+
+		void create(vk::physical_device &pdev, uint32_t graphics_queue_idx)
 		{
 			float queue_priorities[1] = { 0.f };
 			pgpu = &pdev;
@@ -212,50 +539,58 @@ namespace vk
 				VK_KHR_SWAPCHAIN_EXTENSION_NAME
 			};
 
-			std::vector<const char *> layers;
-
-			if (g_cfg.video.debug_output)
-				layers.push_back("VK_LAYER_LUNARG_standard_validation");
-
 			//Enable hardware features manually
 			//Currently we require:
 			//1. Anisotropic sampling
 			//2. DXT support
+			//3. Indexable storage buffers
 			VkPhysicalDeviceFeatures available_features;
 			vkGetPhysicalDeviceFeatures(*pgpu, &available_features);
 
 			available_features.samplerAnisotropy = VK_TRUE;
 			available_features.textureCompressionBC = VK_TRUE;
+			available_features.shaderStorageBufferArrayDynamicIndexing = VK_TRUE;
 
 			VkDeviceCreateInfo device = {};
 			device.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 			device.pNext = NULL;
 			device.queueCreateInfoCount = 1;
 			device.pQueueCreateInfos = &queue;
-			device.enabledLayerCount = static_cast<uint32_t>(layers.size());
-			device.ppEnabledLayerNames = layers.data();
+			device.enabledLayerCount = 0;
+			device.ppEnabledLayerNames = nullptr; // Deprecated
 			device.enabledExtensionCount = 1;
 			device.ppEnabledExtensionNames = requested_extensions;
 			device.pEnabledFeatures = &available_features;
 
 			CHECK_RESULT(vkCreateDevice(*pgpu, &device, nullptr, &dev));
-			memory_map = vk::get_memory_mapping(pdev);
-		}
 
-		~render_device()
-		{
+			memory_map = vk::get_memory_mapping(pdev);
+			m_formats_support = vk::get_optimal_tiling_supported_formats(pdev);
+
+			if (g_cfg.video.disable_vulkan_mem_allocator)
+				m_allocator = std::make_unique<vk::mem_allocator_vk>(dev, pdev);
+			else
+				m_allocator = std::make_unique<vk::mem_allocator_vma>(dev, pdev);
 		}
 
 		void destroy()
 		{
 			if (dev && pgpu)
 			{
+				if (m_allocator)
+				{
+					m_allocator->destroy();
+					m_allocator.reset();
+				}
+
 				vkDestroyDevice(dev, nullptr);
 				dev = nullptr;
+				memory_map = {};
+				m_formats_support = {};
 			}
 		}
 
-		bool get_compatible_memory_type(u32 typeBits, u32 desired_mask, u32 *type_index)
+		bool get_compatible_memory_type(u32 typeBits, u32 desired_mask, u32 *type_index) const
 		{
 			VkPhysicalDeviceMemoryProperties mem_infos = pgpu->get_memory_properties();
 
@@ -265,7 +600,11 @@ namespace vk
 				{
 					if ((mem_infos.memoryTypes[i].propertyFlags & desired_mask) == desired_mask)
 					{
-						*type_index = i;
+						if (type_index)
+						{
+							*type_index = i;
+						}
+
 						return true;
 					}
 				}
@@ -286,106 +625,19 @@ namespace vk
 			return memory_map;
 		}
 
-		operator VkDevice&()
+		const gpu_formats_support& get_formats_support() const
+		{
+			return m_formats_support;
+		}
+
+		mem_allocator_base* get_allocator() const
+		{
+			return m_allocator.get();
+		}
+
+		operator VkDevice() const
 		{
 			return dev;
-		}
-	};
-
-	struct memory_block
-	{
-		VkMemoryAllocateInfo info = {};
-		VkDeviceMemory memory;
-
-		memory_block(VkDevice dev, u64 block_sz, uint32_t memory_type_index) : m_device(dev)
-		{
-			info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-			info.allocationSize = block_sz;
-			info.memoryTypeIndex = memory_type_index;
-
-			CHECK_RESULT(vkAllocateMemory(m_device, &info, nullptr, &memory));
-		}
-
-		~memory_block()
-		{
-			vkFreeMemory(m_device, memory, nullptr);
-		}
-
-		memory_block(const memory_block&) = delete;
-		memory_block(memory_block&&) = delete;
-
-	private:
-		VkDevice m_device;
-	};
-
-	class memory_block_deprecated
-	{
-		VkDeviceMemory vram = nullptr;
-		vk::render_device *owner = nullptr;
-		u64 vram_block_sz = 0;
-		bool mappable = false;
-
-	public:
-		memory_block_deprecated() {}
-		~memory_block_deprecated() {}
-
-		void allocate_from_pool(vk::render_device &device, u64 block_sz, bool host_visible, u32 typeBits)
-		{
-			if (vram)
-				destroy();
-
-			u32 typeIndex = 0;
-
-			owner = (vk::render_device*)&device;
-			VkDevice dev = (VkDevice)(*owner);
-
-			u32 access_mask = 0;
-
-			if (host_visible)
-				access_mask |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
-
-			if (!owner->get_compatible_memory_type(typeBits, access_mask, &typeIndex))
-				fmt::throw_exception("Could not find suitable memory type!" HERE);
-
-			VkMemoryAllocateInfo infos;
-			infos.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-			infos.pNext = nullptr;
-			infos.allocationSize = block_sz;
-			infos.memoryTypeIndex = typeIndex;
-
-			CHECK_RESULT(vkAllocateMemory(dev, &infos, nullptr, &vram));
-			vram_block_sz = block_sz;
-			mappable = host_visible;
-		}
-
-		void allocate_from_pool(vk::render_device &device, u64 block_sz, u32 typeBits)
-		{
-			allocate_from_pool(device, block_sz, true, typeBits);
-		}
-
-		void destroy()
-		{
-			VkDevice dev = (VkDevice)(*owner);
-			vkFreeMemory(dev, vram, nullptr);
-
-			owner = nullptr;
-			vram = nullptr;
-			vram_block_sz = 0;
-		}
-
-		bool is_mappable()
-		{
-			return mappable;
-		}
-
-		vk::render_device& get_owner()
-		{
-			return (*owner);
-		}
-
-		operator VkDeviceMemory()
-		{
-			return vram;
 		}
 	};
 
@@ -397,7 +649,7 @@ namespace vk
 		VkImageCreateInfo info = {};
 		std::shared_ptr<vk::memory_block> memory;
 
-		image(vk::render_device &dev,
+		image(const vk::render_device &dev,
 			uint32_t memory_type_index,
 			uint32_t access_flags,
 			VkImageType image_type,
@@ -409,7 +661,7 @@ namespace vk
 			VkImageTiling tiling,
 			VkImageUsageFlags usage,
 			VkImageCreateFlags image_flags)
-			: m_device(dev)
+			: m_device(dev), current_layout(initial_layout)
 		{
 			info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 			info.imageType = image_type;
@@ -437,13 +689,13 @@ namespace vk
 					fmt::throw_exception("No compatible memory type was found!" HERE);
 			}
 
-			memory = std::make_shared<vk::memory_block>(m_device, memory_req.size, memory_type_index);
-			CHECK_RESULT(vkBindImageMemory(m_device, value, memory->memory, 0));
+			memory = std::make_shared<vk::memory_block>(m_device, memory_req.size, memory_req.alignment, memory_type_index);
+			CHECK_RESULT(vkBindImageMemory(m_device, value, memory->get_vk_device_memory(), memory->get_vk_device_memory_offset()));
 		}
 
 		// TODO: Ctor that uses a provided memory heap
 
-		~image()
+		virtual ~image()
 		{
 			vkDestroyImage(m_device, value, nullptr);
 		}
@@ -481,21 +733,23 @@ namespace vk
 			info.format = format;
 			info.image = image;
 			info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-			info.viewType = view_type;
 			info.components = mapping;
+			info.viewType = view_type;
 			info.subresourceRange = range;
 
-			CHECK_RESULT(vkCreateImageView(m_device, &info, nullptr, &value));
+			create_impl();
 		}
 
 		image_view(VkDevice dev, VkImageViewCreateInfo create_info)
 			: m_device(dev), info(create_info)
 		{
-			CHECK_RESULT(vkCreateImageView(m_device, &info, nullptr, &value));
+			create_impl();
 		}
 
-		image_view(VkDevice dev, vk::image* resource, VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}, VkComponentMapping mapping = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A })
-			: m_device(dev)
+		image_view(VkDevice dev, vk::image* resource,
+			const VkComponentMapping mapping = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A },
+			const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1})
+			: m_device(dev), m_resource(resource)
 		{
 			info.format = resource->info.format;
 			info.image = resource->value;
@@ -519,7 +773,7 @@ namespace vk
 				break;
 			}
 
-			CHECK_RESULT(vkCreateImageView(m_device, &info, nullptr, &value));
+			create_impl();
 		}
 
 		~image_view()
@@ -527,10 +781,94 @@ namespace vk
 			vkDestroyImageView(m_device, value, nullptr);
 		}
 
+		u32 encoded_component_map() const
+		{
+#if	(VK_DISABLE_COMPONENT_SWIZZLE)
+			u32 result = (u32)info.components.a - 1;
+			result |= ((u32)info.components.r - 1) << 3;
+			result |= ((u32)info.components.g - 1) << 6;
+			result |= ((u32)info.components.b - 1) << 9;
+
+			return result;
+#else
+			return 0;
+#endif
+		}
+
+		vk::image* image() const
+		{
+			return m_resource;
+		}
+
 		image_view(const image_view&) = delete;
 		image_view(image_view&&) = delete;
+
 	private:
 		VkDevice m_device;
+		vk::image* m_resource = nullptr;
+
+		void create_impl()
+		{
+#if (VK_DISABLE_COMPONENT_SWIZZLE)
+			// Force identity
+			const auto mapping = info.components;
+			info.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+#endif
+
+			CHECK_RESULT(vkCreateImageView(m_device, &info, nullptr, &value));
+
+#if (VK_DISABLE_COMPONENT_SWIZZLE)
+			// Restore requested mapping
+			info.components = mapping;
+#endif
+		}
+	};
+
+	class viewable_image : public image
+	{
+	private:
+		std::unordered_multimap<u32, std::unique_ptr<vk::image_view>> views;
+
+	public:
+		using image::image;
+
+		image_view* get_view(u32 remap_encoding, const std::pair<std::array<u8, 4>, std::array<u8, 4>>& remap,
+			VkImageAspectFlags mask = VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT)
+		{
+			auto found = views.equal_range(remap_encoding);
+			for (auto It = found.first; It != found.second; ++It)
+			{
+				if (It->second->info.subresourceRange.aspectMask & mask)
+				{
+					return It->second.get();
+				}
+			}
+
+			VkComponentMapping real_mapping = vk::apply_swizzle_remap
+			(
+				{native_component_map.a, native_component_map.r, native_component_map.g, native_component_map.b },
+				remap
+			);
+
+			const auto range = vk::get_image_subresource_range(0, 0, info.arrayLayers, info.mipLevels, get_aspect_flags(info.format) & mask);
+			auto view = std::make_unique<vk::image_view>(*get_current_renderer(), this, real_mapping, range);
+
+			auto result = view.get();
+			views.emplace(remap_encoding, std::move(view));
+			return result;
+		}
+
+		void set_native_component_layout(VkComponentMapping new_layout)
+		{
+			if (new_layout.r != native_component_map.r ||
+				new_layout.g != native_component_map.g ||
+				new_layout.b != native_component_map.b ||
+				new_layout.a != native_component_map.a)
+			{
+				native_component_map = new_layout;
+				views.clear();
+			}
+		}
 	};
 
 	struct buffer
@@ -539,7 +877,7 @@ namespace vk
 		VkBufferCreateInfo info = {};
 		std::unique_ptr<vk::memory_block> memory;
 
-		buffer(vk::render_device& dev, u64 size, uint32_t memory_type_index, uint32_t access_flags, VkBufferUsageFlagBits usage, VkBufferCreateFlags flags)
+		buffer(const vk::render_device& dev, u64 size, uint32_t memory_type_index, uint32_t access_flags, VkBufferUsageFlags usage, VkBufferCreateFlags flags)
 			: m_device(dev)
 		{
 			info.size = size;
@@ -562,8 +900,8 @@ namespace vk
 					fmt::throw_exception("No compatible memory type was found!" HERE);
 			}
 
-			memory.reset(new memory_block(m_device, memory_reqs.size, memory_type_index));
-			vkBindBufferMemory(dev, value, memory->memory, 0);
+			memory.reset(new memory_block(m_device, memory_reqs.size, memory_reqs.alignment, memory_type_index));
+			vkBindBufferMemory(dev, value, memory->get_vk_device_memory(), memory->get_vk_device_memory_offset());
 		}
 
 		~buffer()
@@ -573,14 +911,12 @@ namespace vk
 
 		void *map(u64 offset, u64 size)
 		{
-			void *data = nullptr;
-			CHECK_RESULT(vkMapMemory(m_device, memory->memory, offset, std::max<u64>(size, 1u), 0, &data));
-			return data;
+			return memory->map(offset, size);
 		}
 
 		void unmap()
 		{
-			vkUnmapMemory(m_device, memory->memory);
+			memory->unmap();
 		}
 
 		u32 size() const
@@ -816,6 +1152,8 @@ namespace vk
 	{
 	private:
 		bool is_open = false;
+		bool is_pending = false;
+		VkFence m_submit_fence = VK_NULL_HANDLE;
 
 	protected:
 		vk::command_pool *pool = nullptr;
@@ -825,7 +1163,7 @@ namespace vk
 		enum access_type_hint
 		{
 			flush_only, //Only to be submitted/opened/closed via command flush
-			all         //Auxilliary, can be sumitted/opened/closed at any time
+			all         //Auxiliary, can be submitted/opened/closed at any time
 		}
 		access_hint = flush_only;
 
@@ -833,21 +1171,33 @@ namespace vk
 		command_buffer() {}
 		~command_buffer() {}
 
-		void create(vk::command_pool &cmd_pool)
+		void create(vk::command_pool &cmd_pool, bool auto_reset = false)
 		{
 			VkCommandBufferAllocateInfo infos = {};
 			infos.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 			infos.commandBufferCount = 1;
 			infos.commandPool = (VkCommandPool)cmd_pool;
 			infos.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-
 			CHECK_RESULT(vkAllocateCommandBuffers(cmd_pool.get_owner(), &infos, &commands));
+
+			if (auto_reset)
+			{
+				VkFenceCreateInfo info = {};
+				info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+				CHECK_RESULT(vkCreateFence(cmd_pool.get_owner(), &info, nullptr, &m_submit_fence));
+			}
+
 			pool = &cmd_pool;
 		}
 
 		void destroy()
 		{
 			vkFreeCommandBuffers(pool->get_owner(), (*pool), 1, &commands);
+
+			if (m_submit_fence)
+			{
+				vkDestroyFence(pool->get_owner(), m_submit_fence, nullptr);
+			}
 		}
 
 		vk::command_pool& get_command_pool() const
@@ -855,13 +1205,27 @@ namespace vk
 			return *pool;
 		}
 
-		operator VkCommandBuffer()
+		operator VkCommandBuffer() const
 		{
 			return commands;
 		}
 
+		bool is_recording() const
+		{
+			return is_open;
+		}
+
 		void begin()
 		{
+			if (m_submit_fence && is_pending)
+			{
+				wait_for_fence(m_submit_fence);
+				is_pending = false;
+
+				CHECK_RESULT(vkResetFences(pool->get_owner(), 1, &m_submit_fence));
+				CHECK_RESULT(vkResetCommandBuffer(commands, 0));
+			}
+
 			if (is_open)
 				return;
 
@@ -894,6 +1258,12 @@ namespace vk
 			{
 				LOG_ERROR(RSX, "commandbuffer->submit was called whilst the command buffer is in a recording state");
 				return;
+			}
+
+			if (fence == VK_NULL_HANDLE)
+			{
+				fence = m_submit_fence;
+				is_pending = (fence != VK_NULL_HANDLE);
 			}
 
 			VkSubmitInfo infos = {};
@@ -1036,7 +1406,7 @@ public:
 	public:
 		swapchain_base(physical_device &gpu, uint32_t _present_queue, uint32_t _graphics_queue, VkFormat format = VK_FORMAT_B8G8R8A8_UNORM)
 		{
-			dev = render_device(gpu, _graphics_queue);
+			dev.create(gpu, _graphics_queue);
 
 			if (_graphics_queue < UINT32_MAX) vkGetDeviceQueue(dev, _graphics_queue, 0, &vk_graphics_queue);
 			if (_present_queue < UINT32_MAX) vkGetDeviceQueue(dev, _present_queue, 0, &vk_present_queue);
@@ -1046,7 +1416,7 @@ public:
 			m_surface_format = format;
 		}
 
-		~swapchain_base(){}
+		virtual ~swapchain_base() {}
 
 		virtual void create(display_handle_t& handle) = 0;
 		virtual void destroy(bool full = true) = 0;
@@ -1168,7 +1538,6 @@ public:
 		{
 			window_handle = handle;
 			hDstDC = GetDC(handle);
-			init();
 		}
 
 		void destroy(bool full=true) override
@@ -1198,6 +1567,52 @@ public:
 
 			src.first = false;
 			return VK_SUCCESS;
+		}
+#elif defined(__APPLE__)
+
+	class swapchain_MacOS : public native_swapchain_base
+	{
+		void* nsView = NULL;
+
+	public:
+		swapchain_MacOS(physical_device &gpu, uint32_t _present_queue, uint32_t _graphics_queue, VkFormat format = VK_FORMAT_B8G8R8A8_UNORM)
+		: native_swapchain_base(gpu, _present_queue, _graphics_queue, format)
+		{}
+
+		~swapchain_MacOS(){}
+
+		bool init() override
+		{
+			//TODO: get from `nsView`
+			m_width = 0;
+			m_height = 0;
+
+			if (m_width == 0 || m_height == 0)
+			{
+				LOG_ERROR(RSX, "Invalid window dimensions %d x %d", m_width, m_height);
+				return false;
+			}
+
+			init_swapchain_images(dev, 3);
+			return true;
+		}
+
+		void create(display_handle_t& window_handle) override
+		{
+			nsView = window_handle;
+		}
+
+		void destroy(bool full=true) override
+		{
+			swapchain_images.clear();
+
+			if (full)
+				dev.destroy();
+		}
+
+		VkResult present(u32 index) override
+		{
+			fmt::throw_exception("Native macOS swapchain is not implemented yet!");
 		}
 #else
 
@@ -1252,7 +1667,15 @@ public:
 
 		void create(display_handle_t& window_handle) override
 		{
-			window_handle.match([&](std::pair<Display*, Window> p) { display = p.first; window = p.second; }, [](auto _) {});
+			std::visit([&](auto&& p)
+			{
+				using T = std::decay_t<decltype(p)>;
+				if constexpr (std::is_same_v<T, std::pair<Display*, Window>>)
+				{
+					display = p.first;
+					window = p.second;
+				}
+			}, window_handle);
 
 			if (display == NULL)
 			{
@@ -1261,7 +1684,6 @@ public:
 			}
 
 			gc = DefaultGC(display, DefaultScreen(display));
-			init();
 		}
 
 		void destroy(bool full=true) override
@@ -1318,7 +1740,7 @@ public:
 			swapchain_images[index].second->do_dma_transfer(cmd);
 		}
 
-		VkImage& get_image(u32 index)
+		VkImage& get_image(u32 index) override
 		{
 			return (VkImage&)(*swapchain_images[index].second.get());
 		}
@@ -1459,11 +1881,15 @@ public:
 			VkPresentModeKHR swapchain_present_mode = VK_PRESENT_MODE_FIFO_KHR;
 			std::vector<VkPresentModeKHR> preferred_modes;
 
-			//List of preferred modes in decreasing desirability
-			if (g_cfg.video.vsync)
-				preferred_modes = { VK_PRESENT_MODE_MAILBOX_KHR };
-			else if (!g_cfg.video.vk.force_fifo)
-				preferred_modes = { VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR, VK_PRESENT_MODE_MAILBOX_KHR };
+			if (!g_cfg.video.vk.force_fifo)
+			{
+				// List of preferred modes in decreasing desirability
+				// NOTE: Always picks "triple-buffered vsync" types if possible
+				if (!g_cfg.video.vsync)
+				{
+					preferred_modes = { VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_RELAXED_KHR };
+				}
+			}
 
 			bool mode_found = false;
 			for (VkPresentModeKHR preferred_mode : preferred_modes)
@@ -1519,8 +1945,8 @@ public:
 			swap_info.oldSwapchain = old_swapchain;
 			swap_info.clipped = true;
 
-			swap_info.imageExtent.width = m_width;
-			swap_info.imageExtent.height = m_height;
+			swap_info.imageExtent.width = std::max(m_width, surface_descriptors.minImageExtent.width);
+			swap_info.imageExtent.height = std::max(m_height, surface_descriptors.minImageExtent.height);
 
 			createSwapchainKHR(dev, &swap_info, nullptr, &m_vk_swapchain);
 
@@ -1562,7 +1988,7 @@ public:
 			return queuePresentKHR(vk_present_queue, &present);
 		}
 
-		VkImage& get_image(u32 index)
+		VkImage& get_image(u32 index) override
 		{
 			return (VkImage&)swapchain_images[index];
 		}
@@ -1616,7 +2042,7 @@ public:
 		{
 			m_instance = nullptr;
 
-			//Check that some critical entry-points have been loaded into memory indicating prescence of a loader
+			//Check that some critical entry-points have been loaded into memory indicating presence of a loader
 			loader_exists = (vkCreateInstance != nullptr);
 		}
 
@@ -1681,35 +2107,43 @@ public:
 			std::vector<const char *> extensions;
 			std::vector<const char *> layers;
 
-#ifndef __APPLE__
-			extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
-			extensions.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
+			if (!fast)
+			{
+				supported_extensions support;
+
+				extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+				if (support.is_supported(VK_EXT_DEBUG_REPORT_EXTENSION_NAME))
+				{
+					extensions.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
+				}
 #ifdef _WIN32
-			extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+				extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+#elif defined(__APPLE__)
+				extensions.push_back(VK_MVK_MACOS_SURFACE_EXTENSION_NAME);
 #else
-			supported_extensions support;
-			bool found_surface_ext = false;
-			if (support.is_supported(VK_KHR_XLIB_SURFACE_EXTENSION_NAME))
-			{
-				extensions.push_back(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
-				found_surface_ext = true;
-			}
+				bool found_surface_ext = false;
+				if (support.is_supported(VK_KHR_XLIB_SURFACE_EXTENSION_NAME))
+				{
+					extensions.push_back(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
+					found_surface_ext = true;
+				}
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
-			if (support.is_supported(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME))
-			{
-				extensions.push_back(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
-				found_surface_ext = true;
+				if (support.is_supported(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME))
+				{
+					extensions.push_back(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME);
+					found_surface_ext = true;
+				}
+#endif //(WAYLAND)
+				if (!found_surface_ext)
+				{
+					LOG_ERROR(RSX, "Could not find a supported Vulkan surface extension");
+					return 0;
+				}
+#endif //(WIN32, __APPLE__)
+				if (g_cfg.video.debug_output)
+					layers.push_back("VK_LAYER_LUNARG_standard_validation");
 			}
-#endif
-			if (!found_surface_ext)
-			{
-				LOG_ERROR(RSX, "Could not find a supported Vulkan surface extension");
-				return 0;
-			}
-#endif
-			if (!fast && g_cfg.video.debug_output)
-				layers.push_back("VK_LAYER_LUNARG_standard_validation");
-#endif
+
 			VkInstanceCreateInfo instance_info = {};
 			instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
 			instance_info.pApplicationInfo = &app;
@@ -1781,6 +2215,7 @@ public:
 
 		swapchain_base* createSwapChain(display_handle_t window_handle, vk::physical_device &dev)
 		{
+			VkSurfaceKHR surface;
 #ifdef _WIN32
 			using swapchain_NATIVE = swapchain_WIN32;
 			HINSTANCE hInstance = NULL;
@@ -1790,44 +2225,51 @@ public:
 			createInfo.hinstance = hInstance;
 			createInfo.hwnd = window_handle;
 
-			VkSurfaceKHR surface;
 			CHECK_RESULT(vkCreateWin32SurfaceKHR(m_instance, &createInfo, NULL, &surface));
 
 #elif defined(__APPLE__)
-			using swapchain_NATIVE = swapchain_X11;
-			VkSurfaceKHR surface;
+			using swapchain_NATIVE = swapchain_MacOS;
+			VkMacOSSurfaceCreateInfoMVK createInfo = {};
+			createInfo.sType = VK_STRUCTURE_TYPE_MACOS_SURFACE_CREATE_INFO_MVK;
+			createInfo.pView = window_handle;
 
+			CHECK_RESULT(vkCreateMacOSSurfaceMVK(m_instance, &createInfo, NULL, &surface));
 #else
 			using swapchain_NATIVE = swapchain_X11;
-			VkSurfaceKHR surface;
 
-			window_handle.match(
-				[&](std::pair<Display*, Window> p)
+			std::visit([&](auto&& p)
+			{
+				using T = std::decay_t<decltype(p)>;
+
+				if constexpr (std::is_same_v<T, std::pair<Display*, Window>>)
 				{
 					VkXlibSurfaceCreateInfoKHR createInfo = {};
-					createInfo.sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
-					createInfo.dpy = p.first;
-					createInfo.window = p.second;
+					createInfo.sType                      = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR;
+					createInfo.dpy                        = p.first;
+					createInfo.window                     = p.second;
 					CHECK_RESULT(vkCreateXlibSurfaceKHR(this->m_instance, &createInfo, nullptr, &surface));
 				}
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
-				, [&](std::pair<wl_display*, wl_surface*> p)
+				else if constexpr (std::is_same_v<T, std::pair<wl_display*, wl_surface*>>)
 				{
 					VkWaylandSurfaceCreateInfoKHR createInfo = {};
-					createInfo.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
-					createInfo.display = p.first;
-					createInfo.surface = p.second;
+					createInfo.sType                         = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+					createInfo.display                       = p.first;
+					createInfo.surface                       = p.second;
 					CHECK_RESULT(vkCreateWaylandSurfaceKHR(this->m_instance, &createInfo, nullptr, &surface));
 				}
+				else
+				{
+					static_assert(std::conditional_t<true, std::false_type, T>::value, "Unhandled window_handle type in std::variant");
+				}
 #endif
-			);
+			}, window_handle);
 #endif
 
 			uint32_t device_queues = dev.get_queue_count();
 			std::vector<VkBool32> supportsPresent(device_queues, VK_FALSE);
 			bool present_possible = false;
 
-#ifndef __APPLE__
 			for (u32 index = 0; index < device_queues; index++)
 			{
 				vkGetPhysicalDeviceSurfaceSupportKHR(dev, index, surface, &supportsPresent[index]);
@@ -1846,7 +2288,6 @@ public:
 			{
 				LOG_ERROR(RSX, "It is not possible for the currently selected GPU to present to the window (Likely caused by NVIDIA driver running the current display)");
 			}
-#endif
 
 			// Search for a graphics and a present queue in the array of queue
 			// families, try to find one that supports both
@@ -1905,10 +2346,6 @@ public:
 				return swapchain;
 			}
 
-#ifdef __APPLE__
-			fmt::throw_exception("Unreachable" HERE);
-#endif
-
 			// Get the list of VkFormat's that are supported:
 			uint32_t formatCount;
 			CHECK_RESULT(vkGetPhysicalDeviceSurfaceFormatsKHR(dev, surface, &formatCount, nullptr));
@@ -1948,13 +2385,13 @@ public:
 	class descriptor_pool
 	{
 		VkDescriptorPool pool = nullptr;
-		vk::render_device *owner = nullptr;
+		const vk::render_device *owner = nullptr;
 
 	public:
 		descriptor_pool() {}
 		~descriptor_pool() {}
 
-		void create(vk::render_device &dev, VkDescriptorPoolSize *sizes, u32 size_descriptors_count)
+		void create(const vk::render_device &dev, VkDescriptorPoolSize *sizes, u32 size_descriptors_count)
 		{
 			VkDescriptorPoolCreateInfo infos = {};
 			infos.flags = 0;
@@ -1992,8 +2429,8 @@ public:
 		VkQueryPool query_pool = VK_NULL_HANDLE;
 		vk::render_device* owner = nullptr;
 
+		std::deque<u32> available_slots;
 		std::vector<bool> query_active_status;
-
 	public:
 
 		void create(vk::render_device &dev, u32 num_entries)
@@ -2007,6 +2444,12 @@ public:
 			owner = &dev;
 
 			query_active_status.resize(num_entries, false);
+			available_slots.resize(num_entries);
+
+			for (u32 n = 0; n < num_entries; ++n)
+			{
+				available_slots[n] = n;
+			}
 		}
 
 		void destroy()
@@ -2063,11 +2506,17 @@ public:
 
 		void reset_query(vk::command_buffer &cmd, u32 index)
 		{
-			vkCmdResetQueryPool(cmd, query_pool, index, 1);
-			query_active_status[index] = false;
+			if (query_active_status[index])
+			{
+				vkCmdResetQueryPool(cmd, query_pool, index, 1);
+
+				query_active_status[index] = false;
+				available_slots.push_back(index);
+			}
 		}
 
-		void reset_queries(vk::command_buffer &cmd, std::vector<u32> &list)
+		template<template<class> class _List>
+		void reset_queries(vk::command_buffer &cmd, _List<u32> &list)
 		{
 			for (const auto index : list)
 				reset_query(cmd, index);
@@ -2084,23 +2533,214 @@ public:
 
 		u32 find_free_slot()
 		{
-			for (u32 n = 0; n < query_active_status.size(); n++)
+			if (available_slots.empty())
 			{
-				if (query_active_status[n] == false)
-					return n;
+				return ~0u;
 			}
 
-			return UINT32_MAX;
+			u32 result = available_slots.front();
+			available_slots.pop_front();
+
+			verify(HERE), !query_active_status[result];
+			return result;
+		}
+	};
+
+	class graphics_pipeline_state
+	{
+	public:
+		VkPipelineInputAssemblyStateCreateInfo ia;
+		VkPipelineDepthStencilStateCreateInfo ds;
+		VkPipelineColorBlendAttachmentState att_state[4];
+		VkPipelineColorBlendStateCreateInfo cs;
+		VkPipelineRasterizationStateCreateInfo rs;
+
+		graphics_pipeline_state()
+		{
+			// NOTE: Vk** structs have padding bytes
+			memset(this, 0, sizeof(graphics_pipeline_state));
+
+			ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+			cs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+			ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+
+			rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+			rs.polygonMode = VK_POLYGON_MODE_FILL;
+			rs.cullMode = VK_CULL_MODE_NONE;
+			rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+			rs.lineWidth = 1.f;
+		}
+
+		graphics_pipeline_state(const graphics_pipeline_state& other)
+		{
+			// NOTE: Vk** structs have padding bytes
+			memcpy(this, &other, sizeof(graphics_pipeline_state));
+
+			if (other.cs.pAttachments == other.att_state)
+			{
+				// Rebase pointer
+				cs.pAttachments = att_state;
+			}
+		}
+
+		~graphics_pipeline_state()
+		{}
+
+		graphics_pipeline_state& operator = (const graphics_pipeline_state& other)
+		{
+			if (this != &other)
+			{
+				// NOTE: Vk** structs have padding bytes
+				memcpy(this, &other, sizeof(graphics_pipeline_state));
+
+				if (other.cs.pAttachments == other.att_state)
+				{
+					// Rebase pointer
+					cs.pAttachments = att_state;
+				}
+			}
+
+			return *this;
+		}
+
+		void set_primitive_type(VkPrimitiveTopology type)
+		{
+			ia.topology = type;
+		}
+
+		void enable_primitive_restart(bool enable = true)
+		{
+			ia.primitiveRestartEnable = enable? VK_TRUE : VK_FALSE;
+		}
+
+		void set_color_mask(bool r, bool g, bool b, bool a)
+		{
+			VkColorComponentFlags mask = 0;
+			if (a) mask |= VK_COLOR_COMPONENT_A_BIT;
+			if (b) mask |= VK_COLOR_COMPONENT_B_BIT;
+			if (g) mask |= VK_COLOR_COMPONENT_G_BIT;
+			if (r) mask |= VK_COLOR_COMPONENT_R_BIT;
+
+			att_state[0].colorWriteMask = mask;
+			att_state[1].colorWriteMask = mask;
+			att_state[2].colorWriteMask = mask;
+			att_state[3].colorWriteMask = mask;
+		}
+
+		void set_depth_mask(bool enable)
+		{
+			ds.depthWriteEnable = enable ? VK_TRUE : VK_FALSE;
+		}
+
+		void set_stencil_mask(u32 mask)
+		{
+			ds.front.writeMask = mask;
+			ds.back.writeMask = mask;
+		}
+
+		void set_stencil_mask_separate(int face, u32 mask)
+		{
+			if (!face)
+				ds.front.writeMask = mask;
+			else
+				ds.back.writeMask = mask;
+		}
+
+		void enable_depth_test(VkCompareOp op)
+		{
+			ds.depthTestEnable = VK_TRUE;
+			ds.depthCompareOp = op;
+		}
+
+		void enable_depth_clamp(bool enable = true)
+		{
+			rs.depthClampEnable = enable ? VK_TRUE : VK_FALSE;
+		}
+
+		void enable_depth_bias(bool enable = true)
+		{
+			rs.depthBiasEnable = enable ? VK_TRUE : VK_FALSE;
+		}
+
+		void enable_depth_bounds_test(bool enable = true)
+		{
+			ds.depthBoundsTestEnable = enable? VK_TRUE : VK_FALSE;
+		}
+
+		void enable_blend(int mrt_index, VkBlendFactor src_factor_rgb, VkBlendFactor src_factor_a,
+			VkBlendFactor dst_factor_rgb, VkBlendFactor dst_factor_a,
+			VkBlendOp equation_rgb, VkBlendOp equation_a)
+		{
+			att_state[mrt_index].srcColorBlendFactor = src_factor_rgb;
+			att_state[mrt_index].srcAlphaBlendFactor = src_factor_a;
+			att_state[mrt_index].dstColorBlendFactor = dst_factor_rgb;
+			att_state[mrt_index].dstAlphaBlendFactor = dst_factor_a;
+			att_state[mrt_index].colorBlendOp = equation_rgb;
+			att_state[mrt_index].alphaBlendOp = equation_a;
+			att_state[mrt_index].blendEnable = VK_TRUE;
+		}
+
+		void enable_stencil_test(VkStencilOp fail, VkStencilOp zfail, VkStencilOp pass,
+			VkCompareOp func, u32 func_mask, u32 ref)
+		{
+			ds.front.failOp = fail;
+			ds.front.passOp = pass;
+			ds.front.depthFailOp = zfail;
+			ds.front.compareOp = func;
+			ds.front.compareMask = func_mask;
+			ds.front.reference = ref;
+			ds.back = ds.front;
+
+			ds.stencilTestEnable = VK_TRUE;
+		}
+
+		void enable_stencil_test_separate(int face, VkStencilOp fail, VkStencilOp zfail, VkStencilOp pass,
+			VkCompareOp func, u32 func_mask, u32 ref)
+		{
+			auto& face_props = (face ? ds.back : ds.front);
+			face_props.failOp = fail;
+			face_props.passOp = pass;
+			face_props.depthFailOp = zfail;
+			face_props.compareOp = func;
+			face_props.compareMask = func_mask;
+			face_props.reference = ref;
+
+			ds.stencilTestEnable = VK_TRUE;
+		}
+
+		void enable_logic_op(VkLogicOp op)
+		{
+			cs.logicOpEnable = VK_TRUE;
+			cs.logicOp = op;
+		}
+
+		void enable_cull_face(VkCullModeFlags cull_mode)
+		{
+			rs.cullMode = cull_mode;
+		}
+
+		void set_front_face(VkFrontFace face)
+		{
+			rs.frontFace = face;
+		}
+
+		void set_attachment_count(u32 count)
+		{
+			cs.attachmentCount = count;
+			cs.pAttachments = att_state;
 		}
 	};
 
 	namespace glsl
 	{
-		enum program_input_type
+		enum program_input_type : u32
 		{
 			input_type_uniform_buffer = 0,
 			input_type_texel_buffer = 1,
-			input_type_texture = 2
+			input_type_texture = 2,
+			input_type_storage_buffer = 3,
+
+			input_type_max_enum = 4
 		};
 
 		struct bound_sampler
@@ -2126,14 +2766,94 @@ public:
 			bound_buffer as_buffer;
 			bound_sampler as_sampler;
 
-			int location;
+			u32 location;
 			std::string name;
+		};
+
+		class shader
+		{
+			::glsl::program_domain type = ::glsl::program_domain::glsl_vertex_program;
+			VkShaderModule m_handle = VK_NULL_HANDLE;
+			std::string m_source;
+			std::vector<u32> m_compiled;
+
+		public:
+			shader()
+			{}
+
+			~shader()
+			{}
+
+			void create(::glsl::program_domain domain, const std::string& source)
+			{
+				type = domain;
+				m_source = source;
+			}
+
+			VkShaderModule compile()
+			{
+				verify(HERE), m_handle == VK_NULL_HANDLE;
+
+				if (!vk::compile_glsl_to_spv(m_source, type, m_compiled))
+				{
+					std::string shader_type = type == ::glsl::program_domain::glsl_vertex_program ? "vertex" :
+						type == ::glsl::program_domain::glsl_fragment_program ? "fragment" : "compute";
+
+					fmt::throw_exception("Failed to compile %s shader" HERE, shader_type);
+				}
+
+				VkShaderModuleCreateInfo vs_info;
+				vs_info.codeSize = m_compiled.size() * sizeof(u32);
+				vs_info.pNext = nullptr;
+				vs_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+				vs_info.pCode = (uint32_t*)m_compiled.data();
+				vs_info.flags = 0;
+
+				VkDevice dev = (VkDevice)*vk::get_current_renderer();
+				vkCreateShaderModule(dev, &vs_info, nullptr, &m_handle);
+
+				return m_handle;
+			}
+
+			void destroy()
+			{
+				m_source.clear();
+				m_compiled.clear();
+
+				if (m_handle)
+				{
+					VkDevice dev = (VkDevice)*vk::get_current_renderer();
+					vkDestroyShaderModule(dev, m_handle, nullptr);
+					m_handle = nullptr;
+				}
+			}
+
+			const std::string& get_source() const
+			{
+				return m_source;
+			}
+
+			const std::vector<u32> get_compiled() const
+			{
+				return m_compiled;
+			}
+
+			VkShaderModule get_handle() const
+			{
+				return m_handle;
+			}
 		};
 
 		class program
 		{
-			std::vector<program_input> uniforms;
+			std::array<std::vector<program_input>, input_type_max_enum> uniforms;
 			VkDevice m_device;
+
+			std::array<u32, 16> fs_texture_bindings;
+			std::array<u32, 16> fs_texture_mirror_bindings;
+			std::array<u32, 4>  vs_texture_bindings;
+			bool linked;
+
 		public:
 			VkPipeline pipeline;
 			u64 attribute_location_mask;
@@ -2145,40 +2865,123 @@ public:
 			~program();
 
 			program& load_uniforms(::glsl::program_domain domain, const std::vector<program_input>& inputs);
+			program& link();
 
-			bool has_uniform(std::string uniform_name);
-			void bind_uniform(VkDescriptorImageInfo image_descriptor, std::string uniform_name, VkDescriptorSet &descriptor_set);
-			void bind_uniform(VkDescriptorBufferInfo buffer_descriptor, uint32_t binding_point, VkDescriptorSet &descriptor_set);
-			void bind_uniform(const VkBufferView &buffer_view, const std::string &binding_name, VkDescriptorSet &descriptor_set);
+			bool has_uniform(program_input_type type, const std::string &uniform_name);
+			void bind_uniform(const VkDescriptorImageInfo &image_descriptor, const std::string &uniform_name, VkDescriptorSet &descriptor_set);
+			void bind_uniform(const VkDescriptorImageInfo &image_descriptor, int texture_unit, ::glsl::program_domain domain, VkDescriptorSet &descriptor_set, bool is_stencil_mirror = false);
+			void bind_uniform(const VkDescriptorBufferInfo &buffer_descriptor, uint32_t binding_point, VkDescriptorSet &descriptor_set);
+			void bind_uniform(const VkBufferView &buffer_view, program_input_type type, const std::string &binding_name, VkDescriptorSet &descriptor_set);
+
+			void bind_buffer(const VkDescriptorBufferInfo &buffer_descriptor, uint32_t binding_point, VkDescriptorType type, VkDescriptorSet &descriptor_set);
 
 			u64 get_vertex_input_attributes_mask();
 		};
 	}
 
-	struct vk_data_heap : public data_heap
+	struct data_heap : public ::data_heap
 	{
-		std::unique_ptr<vk::buffer> heap;
+		std::unique_ptr<buffer> heap;
 		bool mapped = false;
+		void *_ptr = nullptr;
+
+		std::unique_ptr<buffer> shadow;
+		std::vector<VkBufferCopy> dirty_ranges;
+
+		// NOTE: Some drivers (RADV) use heavyweight OS map/unmap routines that are insanely slow
+		// Avoid mapping/unmapping to keep these drivers from stalling
+		// NOTE2: HOST_CACHED flag does not keep the mapped ptr around in the driver either
+
+		void create(VkBufferUsageFlags usage, size_t size, const char *name = "unnamed", size_t guard = 0x10000)
+		{
+			::data_heap::init(size, name, guard);
+
+			const auto device = get_current_renderer();
+			const auto memory_map = device->get_memory_mapping();
+
+			VkFlags memory_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+			auto memory_index = memory_map.host_visible_coherent;
+
+			if (!(get_heap_compatible_buffer_types() & usage))
+			{
+				LOG_WARNING(RSX, "Buffer usage %u is not heap-compatible using this driver, explicit staging buffer in use", (u32)usage);
+
+				shadow.reset(new buffer(*device, size, memory_index, memory_flags, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, 0));
+				usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+				memory_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+				memory_index = memory_map.device_local;
+			}
+
+			heap.reset(new buffer(*device, size, memory_index, memory_flags, usage, 0));
+		}
+
+		void destroy()
+		{
+			if (mapped)
+			{
+				unmap(true);
+			}
+
+			heap.reset();
+			shadow.reset();
+		}
 
 		void* map(size_t offset, size_t size)
 		{
-			mapped = true;
-			return heap->map(offset, size);
+			if (!_ptr)
+			{
+				if (shadow)
+					_ptr = shadow->map(0, shadow->size());
+				else
+					_ptr = heap->map(0, heap->size());
+
+				mapped = true;
+			}
+
+			if (shadow)
+			{
+				dirty_ranges.push_back({offset, offset, size});
+			}
+
+			return (u8*)_ptr + offset;
 		}
 
-		void unmap()
+		void unmap(bool force = false)
 		{
-			mapped = false;
-			heap->unmap();
+			if (force || g_cfg.video.disable_vulkan_mem_allocator)
+			{
+				if (shadow)
+					shadow->unmap();
+				else
+					heap->unmap();
+
+				mapped = false;
+				_ptr = nullptr;
+			}
+		}
+
+		bool dirty()
+		{
+			return !dirty_ranges.empty();
+		}
+
+		void sync(const vk::command_buffer& cmd)
+		{
+			if (!dirty_ranges.empty())
+			{
+				verify (HERE), shadow, heap;
+				vkCmdCopyBuffer(cmd, shadow->value, heap->value, (u32)dirty_ranges.size(), dirty_ranges.data());
+				dirty_ranges.resize(0);
+
+				insert_buffer_memory_barrier(cmd, heap->value, 0, heap->size(),
+						VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+						VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+			}
 		}
 	};
 
-	/**
-	* Allocate enough space in upload_buffer and write all mipmap/layer data into the subbuffer.
-	* Then copy all layers into dst_image.
-	* dst_image must be in TRANSFER_DST_OPTIMAL layout and upload_buffer have TRANSFER_SRC_BIT usage flag.
-	*/
-	void copy_mipmaped_image_using_buffer(VkCommandBuffer cmd, VkImage dst_image,
-		const std::vector<rsx_subresource_layout>& subresource_layout, int format, bool is_swizzled, u16 mipmap_count,
-		VkImageAspectFlags flags, vk::vk_data_heap &upload_heap);
+	struct blitter
+	{
+		void scale_image(vk::command_buffer& cmd, vk::image* src, vk::image* dst, areai src_area, areai dst_area, bool interpolate, bool /*is_depth*/, const rsx::typeless_xfer& xfer_info);
+	};
 }

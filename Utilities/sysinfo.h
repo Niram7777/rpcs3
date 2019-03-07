@@ -29,33 +29,19 @@ namespace utils
 
 	bool has_ssse3();
 
+	bool has_sse41();
+
 	bool has_avx();
 
 	bool has_avx2();
 
 	bool has_rtm();
 
+	bool has_mpx();
+
 	bool has_512();
 
 	bool has_xop();
-
-	inline bool transaction_enter()
-	{
-		while (true)
-		{
-			const auto status = _xbegin();
-
-			if (status == _XBEGIN_STARTED)
-			{
-				return true;
-			}
-
-			if (!(status & _XABORT_RETRY))
-			{
-				return false;
-			}
-		}
-	}
 
 	std::string get_system_info();
 }

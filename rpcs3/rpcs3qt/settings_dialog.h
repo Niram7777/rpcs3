@@ -34,6 +34,8 @@ private Q_SLOTS:
 	void OnApplyConfig();
 	void OnApplyStylesheet();
 private:
+	void EnhanceSlider(emu_settings::SettingsType settings_type, QSlider* slider, QLabel* label, const QString& label_text);
+
 	//emulator tab
 	void AddConfigs();
 	void AddStylesheets();
@@ -47,10 +49,15 @@ private:
 	std::shared_ptr<gui_settings> xgui_settings;
 	std::shared_ptr<emu_settings> xemu_settings;
 
+	// Discord
+	bool m_use_discord;
+	QString m_discord_state;
+
 	// descriptions
 	QList<QPair<QLabel*, QString>> m_description_labels;
 	QHash<QObject*, QString> m_descriptions;
 	void SubscribeDescription(QLabel* description);
 	void SubscribeTooltip(QObject* object, const QString& tooltip);
+	void SubscribeTooltip(QList<QObject*> objects, const QString& tooltip);
 	bool eventFilter(QObject* object, QEvent* event) override;
 };

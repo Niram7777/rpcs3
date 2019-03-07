@@ -8,6 +8,9 @@ extern "C"
 {
 #include "libavcodec/avcodec.h"
 #include "libavformat/avformat.h"
+#ifndef AV_INPUT_BUFFER_PADDING_SIZE
+#define AV_INPUT_BUFFER_PADDING_SIZE FF_INPUT_BUFFER_PADDING_SIZE
+#endif
 }
 
 #include "cellPamf.h"
@@ -18,7 +21,7 @@ extern "C"
 
 extern std::mutex g_mutex_avcodec_open2;
 
-logs::channel cellAdec("cellAdec");
+LOG_CHANNEL(cellAdec);
 
 class AudioDecoder : public ppu_thread
 {
@@ -68,7 +71,7 @@ public:
 	bool use_ats_headers;
 
 	AudioDecoder(s32 type, u32 addr, u32 size, vm::ptr<CellAdecCbMsg> func, u32 arg)
-		: ppu_thread("HLE Audio Decoder")
+		: ppu_thread({}, "", 0)
 		, type(type)
 		, memAddr(addr)
 		, memSize(size)
@@ -156,7 +159,7 @@ public:
 		}
 	}
 
-	virtual void cpu_task() override
+	void non_task()
 	{
 		while (true)
 		{
@@ -229,8 +232,8 @@ public:
 
 						if (size)
 						{
-							data = (u8*)av_calloc(1, size + FF_INPUT_BUFFER_PADDING_SIZE);
-							this->size = size + FF_INPUT_BUFFER_PADDING_SIZE;
+							data = (u8*)av_calloc(1, size + AV_INPUT_BUFFER_PADDING_SIZE);
+							this->size = size + AV_INPUT_BUFFER_PADDING_SIZE;
 						}
 						else
 						{
@@ -249,7 +252,7 @@ public:
 				if (just_started && just_finished)
 				{
 					avcodec_flush_buffers(ctx);
-					
+
 					reader.init = true; // wrong
 					just_finished = false;
 					just_started = false;
@@ -277,7 +280,7 @@ public:
 					opts = nullptr;
 					av_dict_set(&opts, "refcounted_frames", "1", 0);
 					{
-						std::lock_guard<std::mutex> lock(g_mutex_avcodec_open2);
+						std::lock_guard lock(g_mutex_avcodec_open2);
 						// not multithread-safe (???)
 						err = avcodec_open2(ctx, codec, &opts);
 					}
@@ -528,7 +531,7 @@ bool adecCheckType(s32 type)
 		cellAdec.todo("Unimplemented audio codec type (%d)", type);
 		Emu.Pause();
 		break;
-	}	
+	}
 	default: return false;
 	}
 
@@ -561,13 +564,7 @@ s32 cellAdecOpen(vm::ptr<CellAdecType> type, vm::ptr<CellAdecResource> res, vm::
 		return CELL_ADEC_ERROR_ARG;
 	}
 
-	auto&& adec = idm::make_ptr<ppu_thread, AudioDecoder>(type->audioCodecType, res->startAddr, res->totalMemSize, cb->cbFunc, cb->cbArg);
-
-	*handle = adec->id;
-
-	adec->run();
-
-	return CELL_OK;
+	fmt::throw_exception("cellAdec disabled, use LLE.");
 }
 
 s32 cellAdecOpenEx(vm::ptr<CellAdecType> type, vm::ptr<CellAdecResourceEx> res, vm::ptr<CellAdecCb> cb, vm::ptr<u32> handle)
@@ -579,13 +576,7 @@ s32 cellAdecOpenEx(vm::ptr<CellAdecType> type, vm::ptr<CellAdecResourceEx> res, 
 		return CELL_ADEC_ERROR_ARG;
 	}
 
-	auto&& adec = idm::make_ptr<ppu_thread, AudioDecoder>(type->audioCodecType, res->startAddr, res->totalMemSize, cb->cbFunc, cb->cbArg);
-
-	*handle = adec->id;
-
-	adec->run();
-
-	return CELL_OK;
+	fmt::throw_exception("cellAdec disabled, use LLE.");
 }
 
 s32 cellAdecOpenExt(vm::ptr<CellAdecType> type, vm::ptr<CellAdecResourceEx> res, vm::ptr<CellAdecCb> cb, vm::ptr<u32> handle)
@@ -854,7 +845,7 @@ s32 cellAdecGetPcmItem(u32 handle, vm::pptr<CellAdecPcmItem> pcmItem)
 	}
 
 	pcm->pcmHandle = 0; // ???
-	pcm->pcmAttr.bsiInfo_addr = pcm.addr() + SIZE_32(CellAdecPcmItem);
+	pcm->pcmAttr.bsiInfo_addr = pcm.addr() + u32{sizeof(CellAdecPcmItem)};
 	pcm->startAddr = 0x00000312; // invalid address (no output)
 	pcm->size = af.size;
 	pcm->status = CELL_OK;
@@ -866,10 +857,10 @@ s32 cellAdecGetPcmItem(u32 handle, vm::pptr<CellAdecPcmItem> pcmItem)
 
 	if (adecIsAtracX(adec->type))
 	{
-		auto atx = vm::ptr<CellAdecAtracXInfo>::make(pcm.addr() + SIZE_32(CellAdecPcmItem));
+		auto atx = vm::ptr<CellAdecAtracXInfo>::make(pcm.addr() + u32{sizeof(CellAdecPcmItem)});
 
 		atx->samplingFreq = frame->sample_rate;
-		atx->nbytes = frame->nb_samples * SIZE_32(float);
+		atx->nbytes = frame->nb_samples * u32{sizeof(float)};
 		if (frame->channels == 1)
 		{
 			atx->channelConfigIndex = 1;
@@ -894,7 +885,7 @@ s32 cellAdecGetPcmItem(u32 handle, vm::pptr<CellAdecPcmItem> pcmItem)
 	}
 	else if (adec->type == CELL_ADEC_TYPE_MP3)
 	{
-		auto mp3 = vm::ptr<CellAdecMP3Info>::make(pcm.addr() + SIZE_32(CellAdecPcmItem));
+		auto mp3 = vm::ptr<CellAdecMP3Info>::make(pcm.addr() + u32{sizeof(CellAdecPcmItem)});
 
 		// TODO
 		memset(mp3.get_ptr(), 0, sizeof(CellAdecMP3Info));

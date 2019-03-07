@@ -2,7 +2,7 @@
 
 #include "stdafx.h"
 #include "Emu/System.h"
-#include "Emu/Memory/Memory.h"
+#include "Emu/Memory/vm.h"
 #include "table_item_delegate.h"
 
 #include <QDialog>
@@ -43,7 +43,7 @@ public Q_SLOTS:
 	void OnRemove();
 private Q_SLOTS:
 	void ShowContextMenu(const QPoint &pos);
-	void keyPressEvent(QKeyEvent *event);
+	void keyPressEvent(QKeyEvent *event) override;
 };
 
 class AutoPauseConfigDialog : public QDialog

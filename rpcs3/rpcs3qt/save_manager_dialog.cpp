@@ -122,11 +122,8 @@ void save_manager_dialog::Init(std::string dir)
 
 	UpdateList();
 
-	QByteArray geometry = m_gui_settings->GetValue(gui::sd_geometry).toByteArray();
-	if (geometry.isEmpty() == false)
-	{
-		restoreGeometry(geometry);
-	}
+	if (restoreGeometry(m_gui_settings->GetValue(gui::sd_geometry).toByteArray()))
+		resize(size().expandedTo(QDesktopWidget().availableGeometry().size() * 0.5));
 
 	// Connects and events
 	connect(push_close, &QAbstractButton::clicked, this, &save_manager_dialog::close);
@@ -149,7 +146,7 @@ void save_manager_dialog::UpdateList()
 {
 	if (m_dir == "")
 	{
-		m_dir = Emu.GetHddDir() + "home/00000001/savedata/";
+		m_dir = Emu.GetHddDir() + "home/" + Emu.GetUsr() + "/savedata/";
 	}
 
 	m_save_entries = GetSaveEntries(m_dir);
@@ -220,9 +217,9 @@ void save_manager_dialog::OnSort(int logicalIndex)
 		{
 			m_sort_ascending = true;
 		}
+		m_sort_column = logicalIndex;
 		Qt::SortOrder sort_order = m_sort_ascending ? Qt::AscendingOrder : Qt::DescendingOrder;
 		m_list->sortByColumn(m_sort_column, sort_order);
-		m_sort_column = logicalIndex;
 	}
 }
 
@@ -337,7 +334,9 @@ void save_manager_dialog::ShowContextMenu(const QPoint &pos)
 	menu->exec(globalPos);
 }
 
-void save_manager_dialog::closeEvent(QCloseEvent * event)
+void save_manager_dialog::closeEvent(QCloseEvent *event)
 {
 	m_gui_settings->SetValue(gui::sd_geometry, saveGeometry());
+
+	QDialog::closeEvent(event);
 }

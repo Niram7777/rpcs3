@@ -1,13 +1,19 @@
-#pragma once
+﻿#pragma once
 
 #include "Emu/Cell/Common.h"
 #include "Emu/CPU/CPUThread.h"
 #include "Emu/Cell/SPUInterpreter.h"
+#include "Emu/Memory/vm.h"
 #include "MFC.h"
+
+#include <map>
 
 struct lv2_event_queue;
 struct lv2_spu_group;
 struct lv2_int_tag;
+
+// JIT Block
+using spu_function_t = void(*)(spu_thread&, void*, u8*);
 
 // SPU Channels
 enum : u32
@@ -59,7 +65,7 @@ enum : u32
 	SPU_EVENT_ME = 0x40,   // SPU Outbound Interrupt Mailbox available
 	SPU_EVENT_TM = 0x20,   // SPU Decrementer became negative (?)
 	SPU_EVENT_MB = 0x10,   // SPU Inbound mailbox available
-	SPU_EVENT_QV = 0x4,    // MFC SPU Command Queue available
+	SPU_EVENT_QV = 0x8,    // MFC SPU Command Queue available
 	SPU_EVENT_SN = 0x2,    // MFC List Command stall-and-notify event
 	SPU_EVENT_TG = 0x1,    // MFC Tag Group status update event
 
@@ -146,119 +152,110 @@ enum : u32
 	RAW_SPU_PROB_OFFSET = 0x00040000,
 };
 
-struct spu_channel_t
+struct spu_channel
 {
-	struct alignas(8) sync_var_t
-	{
-		bool count; // value available
-		bool wait; // notification required
-		u32 value;
-	};
-
-	atomic_t<sync_var_t> data;
+	// Low 32 bits contain value
+	atomic_t<u64> data;
 
 public:
-	// returns true on success
+	static const u32 off_wait = 32;
+	static const u32 off_count = 63;
+	static const u64 bit_wait = 1ull << off_wait;
+	static const u64 bit_count = 1ull << off_count;
+
+	// Returns true on success
 	bool try_push(u32 value)
 	{
-		const auto old = data.fetch_op([=](sync_var_t& data)
+		const u64 old = data.fetch_op([=](u64& data)
 		{
-			if ((data.wait = data.count) == false)
+			if (UNLIKELY(data & bit_count))
 			{
-				data.count = true;
-				data.value = value;
+				data |= bit_wait;
+			}
+			else
+			{
+				data = bit_count | value;
 			}
 		});
 
-		return !old.count;
+		return !(old & bit_count);
 	}
 
-	// push performing bitwise OR with previous value, may require notification
+	// Push performing bitwise OR with previous value, may require notification
 	void push_or(cpu_thread& spu, u32 value)
 	{
-		const auto old = data.fetch_op([=](sync_var_t& data)
+		const u64 old = data.fetch_op([=](u64& data)
 		{
-			data.count = true;
-			data.wait = false;
-			data.value |= value;
+			data &= ~bit_wait;
+			data |= bit_count | value;
 		});
 
-		if (old.wait) spu.notify();
+		if (old & bit_wait)
+		{
+			spu.notify();
+		}
 	}
 
 	bool push_and(u32 value)
 	{
-		const auto old = data.fetch_op([=](sync_var_t& data)
-		{
-			data.value &= ~value;
-		});
-
-		return (old.value & value) != 0;
+		return (data.fetch_and(~u64{value}) & value) != 0;
 	}
 
-	// push unconditionally (overwriting previous value), may require notification
+	// Push unconditionally (overwriting previous value), may require notification
 	void push(cpu_thread& spu, u32 value)
 	{
-		const auto old = data.fetch_op([=](sync_var_t& data)
+		if (data.exchange(bit_count | value) & bit_wait)
 		{
-			data.count = true;
-			data.wait = false;
-			data.value = value;
-		});
-
-		if (old.wait) spu.notify();
+			spu.notify();
+		}
 	}
 
-	// returns true on success
+	// Returns true on success
 	bool try_pop(u32& out)
 	{
-		const auto old = data.fetch_op([&](sync_var_t& data)
+		const u64 old = data.fetch_op([&](u64& data)
 		{
-			if (data.count)
+			if (LIKELY(data & bit_count))
 			{
-				data.wait = false;
-				out = data.value;
+				out = static_cast<u32>(data);
+				data = 0;
 			}
 			else
 			{
-				data.wait = true;
+				data |= bit_wait;
 			}
-
-			data.count = false;
-			data.value = 0; // ???
 		});
 
-		return old.count;
+		return (old & bit_count) != 0;
 	}
 
-	// pop unconditionally (loading last value), may require notification
+	// Pop unconditionally (loading last value), may require notification
 	u32 pop(cpu_thread& spu)
 	{
-		const auto old = data.fetch_op([](sync_var_t& data)
+		// Value is not cleared and may be read again
+		const u64 old = data.fetch_and(~(bit_count | bit_wait));
+
+		if (old & bit_wait)
 		{
-			data.wait = false;
-			data.count = false;
-			// value is not cleared and may be read again
-		});
+			spu.notify();
+		}
 
-		if (old.wait) spu.notify();
-
-		return old.value;
+		return static_cast<u32>(old);
 	}
 
 	void set_value(u32 value, bool count = true)
 	{
-		data.store({ count, false, value });
+		data.release(u64{count} << off_count | value);
 	}
 
 	u32 get_value()
 	{
-		return data.load().value;
+		return static_cast<u32>(data);
 	}
 
 	u32 get_count()
 	{
-		return data.load().count;
+		return static_cast<u32>(data >> off_count);
 	}
 };
 
@@ -279,8 +276,8 @@ struct spu_channel_4_t
 public:
 	void clear()
 	{
-		values.store({});
-		value3 = 0;
+		values.release({});
+		value3.release(0);
 	}
 
 	// push unconditionally (overwriting latest value), returns true if needs signaling
@@ -367,32 +364,28 @@ struct spu_int_ctrl_t
 
 	void clear()
 	{
-		mask = 0;
-		stat = 0;
+		mask.release(0);
+		stat.release(0);
 		tag = nullptr;
 	}
 };
 
 struct spu_imm_table_t
 {
-	v128 fsmb[65536]; // table for FSMB, FSMBI instructions
-	v128 fsmh[256]; // table for FSMH instruction
-	v128 fsm[16]; // table for FSM instruction
-
 	v128 sldq_pshufb[32]; // table for SHLQBYBI, SHLQBY, SHLQBYI instructions
 	v128 srdq_pshufb[32]; // table for ROTQMBYBI, ROTQMBY, ROTQMBYI instructions
 	v128 rldq_pshufb[16]; // table for ROTQBYBI, ROTQBY, ROTQBYI instructions
 
 	class scale_table_t
 	{
-		std::array<__m128, 155 + 174> m_data;
+		std::array<v128, 155 + 174> m_data;
 
 	public:
 		scale_table_t();
 
 		FORCE_INLINE __m128 operator [] (s32 scale) const
 		{
-			return m_data[scale + 155];
+			return m_data[scale + 155].vf;
 		}
 	}
 	const scale;
@@ -415,11 +408,6 @@ enum FPSCR_EX
 	FPSCR_DINV = 1 << 10,   //Invalid operation
 	FPSCR_DNAN = 1 << 9,    //NaN
 	FPSCR_DDENORM = 1 << 8, //Denormal
-};
-
-enum
-{
-	max_imm_dma_size = 0x4000, // Custom constant, represents the max number of bytes our mfc can transfer immediately, else enqueueing the command
 };
 
 //Is 128 bits, but bits 0-19, 24-28, 32-49, 56-60, 64-81, 88-92, 96-115, 120-124 are unused
@@ -506,26 +494,25 @@ public:
 	}
 };
 
-class SPUThread : public cpu_thread
+class spu_thread : public cpu_thread
 {
 public:
-	virtual void on_spawn() override;
-	virtual void on_init(const std::shared_ptr<void>&) override;
 	virtual std::string get_name() const override;
 	virtual std::string dump() const override;
-	virtual void cpu_task() override;
-	virtual ~SPUThread() override;
+	virtual void cpu_task() override final;
+	virtual void cpu_mem() override;
+	virtual void cpu_unmem() override;
+	virtual ~spu_thread() override;
 	void cpu_init();
+	void cpu_stop();
 
-protected:
-	SPUThread(const std::string& name);
-
-public:
 	static const u32 id_base = 0x02000000; // TODO (used to determine thread type)
 	static const u32 id_step = 1;
 	static const u32 id_count = 2048;
 
-	SPUThread(const std::string& name, u32 index, lv2_spu_group* group);
+	spu_thread(vm::addr_t ls, lv2_spu_group* group, u32 index, std::string_view name);
+
+	u32 pc = 0;
 
 	// General-Purpose Registers
 	std::array<v128, 128> gpr;
@@ -534,11 +521,12 @@ public:
 	// MFC command data
 	spu_mfc_cmd ch_mfc_cmd;
 
-	// MFC command queue (consumer: MFC thread)
-	lf_spsc<spu_mfc_cmd, 16> mfc_queue;
-
-	// MFC command proxy queue (consumer: MFC thread)
-	lf_mpsc<spu_mfc_cmd, 8> mfc_proxy;
+	// MFC command queue
+	spu_mfc_cmd mfc_queue[16]{};
+	u32 mfc_size = 0;
+	u32 mfc_barrier = -1;
+	u32 mfc_fence = -1;
+	atomic_t<u32> mfc_prxy_mask;
 
 	// Reservation Data
 	u64 rtime = 0;
@@ -546,24 +534,22 @@ public:
 	u32 raddr = 0;
 
 	u32 srr0;
-	atomic_t<u32> ch_tag_upd;
-	atomic_t<u32> ch_tag_mask;
-	spu_channel_t ch_tag_stat;
-	atomic_t<u32> ch_stall_mask;
-	spu_channel_t ch_stall_stat;
-	spu_channel_t ch_atomic_stat;
+	u32 ch_tag_upd;
+	u32 ch_tag_mask;
+	spu_channel ch_tag_stat;
+	u32 ch_stall_mask;
+	spu_channel ch_stall_stat;
+	spu_channel ch_atomic_stat;
 
 	spu_channel_4_t ch_in_mbox;
 
-	atomic_t<u32> mfc_prxy_mask;
-
-	spu_channel_t ch_out_mbox;
-	spu_channel_t ch_out_intr_mbox;
+	spu_channel ch_out_mbox;
+	spu_channel ch_out_intr_mbox;
 
 	u64 snr_config; // SPU SNR Config Register
 
-	spu_channel_t ch_snr1; // SPU Signal Notification Register 1
-	spu_channel_t ch_snr2; // SPU Signal Notification Register 2
+	spu_channel ch_snr1; // SPU Signal Notification Register 1
+	spu_channel ch_snr2; // SPU Signal Notification Register 2
 
 	atomic_t<u32> ch_event_mask;
 	atomic_t<u32> ch_event_stat;
@@ -581,29 +567,34 @@ public:
 	std::array<std::pair<u32, std::weak_ptr<lv2_event_queue>>, 32> spuq; // Event Queue Keys for SPU Thread
 	std::weak_ptr<lv2_event_queue> spup[64]; // SPU Ports
 
-	u32 pc = 0; //
 	const u32 index; // SPU index
 	const u32 offset; // SPU LS offset
 	lv2_spu_group* const group; // SPU Thread Group
 
-	const std::string m_name; // Thread name
+	lf_value<std::string> spu_name; // Thread name
 
-	std::exception_ptr pending_exception;
+	std::unique_ptr<class spu_recompiler_base> jit; // Recompiler instance
 
-	std::array<struct spu_function_t*, 65536> compiled_cache{};
-	std::shared_ptr<class SPUDatabase> spu_db;
-	std::shared_ptr<class spu_recompiler_base> spu_rec;
-	u32 recursion_level = 0;
+	u64 block_counter = 0;
+	u64 block_recover = 0;
+	u64 block_failure = 0;
+
+	std::array<v128, 0x4000> stack_mirror; // Return address information
 
 	void push_snr(u32 number, u32 value);
-	void do_dma_transfer(const spu_mfc_cmd& args, bool from_mfc = true);
+	void do_dma_transfer(const spu_mfc_cmd& args);
+	bool do_dma_check(const spu_mfc_cmd& args);
+	bool do_list_transfer(spu_mfc_cmd& args);
+	void do_putlluc(const spu_mfc_cmd& args);
+	void do_mfc(bool wait = true);
+	u32 get_mfc_completed();
 
-	void process_mfc_cmd();
+	bool process_mfc_cmd();
 	u32 get_events(bool waiting = false);
 	void set_events(u32 mask);
 	void set_interrupt_status(bool enable);
 	u32 get_ch_count(u32 ch);
-	bool get_ch_value(u32 ch, u32& out);
+	s64 get_ch_value(u32 ch);
 	bool set_ch_value(u32 ch, u32 value);
 	bool stop_and_signal(u32 code);
 	void halt();
@@ -622,5 +613,21 @@ public:
 	inline to_be_t<T>& _ref(u32 lsa)
 	{
 		return *_ptr<T>(lsa);
+	}
+
+	bool read_reg(const u32 addr, u32& value);
+	bool write_reg(const u32 addr, const u32 value);
+
+	static atomic_t<u32> g_raw_spu_ctr;
+	static atomic_t<u32> g_raw_spu_id[5];
+
+	static u32 find_raw_spu(u32 id)
+	{
+		if (LIKELY(id < std::size(g_raw_spu_id)))
+		{
+			return g_raw_spu_id[id];
+		}
+
+		return -1;
 	}
 };

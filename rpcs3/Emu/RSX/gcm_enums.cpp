@@ -5,6 +5,7 @@ rsx::vertex_base_type rsx::to_vertex_base_type(u8 in)
 {
 	switch (in)
 	{
+	case 0: return rsx::vertex_base_type::ub256;
 	case 1: return rsx::vertex_base_type::s1;
 	case 2: return rsx::vertex_base_type::f;
 	case 3: return rsx::vertex_base_type::sf;
@@ -232,7 +233,7 @@ namespace rsx
 		case cull_face::front: return "front";
 		case cull_face::front_and_back: return "front and back";
 		}
-		fmt::throw_exception("Unexpected enum found" HERE);
+		return "Unknown cull face value";
 	}
 
 	std::string to_string(surface_target target)
@@ -827,17 +828,6 @@ rsx::front_face rsx::to_front_face(u16 in)
 	fmt::throw_exception("Unknown front face 0x%x" HERE, in);
 }
 
-rsx::cull_face rsx::to_cull_face(u16 in)
-{
-	switch (in)
-	{
-	case CELL_GCM_FRONT_AND_BACK: return rsx::cull_face::front_and_back;
-	case CELL_GCM_FRONT: return rsx::cull_face::front;
-	case CELL_GCM_BACK: return rsx::cull_face::back;
-	}
-	fmt::throw_exception("Unknown cull face 0x%x" HERE, in);
-}
-
 enum
 {
 	CELL_GCM_TRANSFER_ORIGIN_CENTER = 1,
@@ -854,7 +844,7 @@ rsx::blit_engine::transfer_origin rsx::blit_engine::to_transfer_origin(u8 in)
 	case CELL_GCM_TRANSFER_ORIGIN_CENTER: return rsx::blit_engine::transfer_origin::center;
 	case CELL_GCM_TRANSFER_ORIGIN_CORNER: return rsx::blit_engine::transfer_origin::corner;
 	}
-	fmt::throw_exception("Unknown tranfer origin 0x%x" HERE, in);
+	fmt::throw_exception("Unknown transfer origin 0x%x" HERE, in);
 }
 
 rsx::blit_engine::transfer_interpolator rsx::blit_engine::to_transfer_interpolator(u8 in)
@@ -864,7 +854,7 @@ rsx::blit_engine::transfer_interpolator rsx::blit_engine::to_transfer_interpolat
 	case CELL_GCM_TRANSFER_INTERPOLATOR_ZOH: return rsx::blit_engine::transfer_interpolator::zoh;
 	case CELL_GCM_TRANSFER_INTERPOLATOR_FOH: return rsx::blit_engine::transfer_interpolator::foh;
 	}
-	fmt::throw_exception("Unknown tranfer interpolator 0x%x" HERE, in);
+	fmt::throw_exception("Unknown transfer interpolator 0x%x" HERE, in);
 }
 
 enum
@@ -888,7 +878,7 @@ rsx::blit_engine::transfer_operation rsx::blit_engine::to_transfer_operation(u8 
 	case CELL_GCM_TRANSFER_OPERATION_SRCCOPY_PREMULT: return rsx::blit_engine::transfer_operation::srccopy_premult;
 	case CELL_GCM_TRANSFER_OPERATION_BLEND_PREMULT: return rsx::blit_engine::transfer_operation::blend_premult;
 	}
-	fmt::throw_exception("Unknown tranfer operation 0x%x" HERE, in);
+	fmt::throw_exception("Unknown transfer operation 0x%x" HERE, in);
 }
 
 enum

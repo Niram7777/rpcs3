@@ -1,5 +1,5 @@
 #include "stdafx.h"
-#include "Emu/Memory/Memory.h"
+#include "Emu/Memory/vm.h"
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
 
@@ -14,7 +14,7 @@ error_code sys_gpio_get(u64 device_id, vm::ptr<u64> value)
 		return CELL_ESRCH;
 	}
 
-	if (!vm::check_addr(value.addr(), sizeof(u64), vm::page_writable))
+	if (!vm::check_addr(value.addr(), sizeof(u64), vm::page_allocated | vm::page_writable))
 	{
 		return CELL_EFAULT;
 	}

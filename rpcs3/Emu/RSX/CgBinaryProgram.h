@@ -1,6 +1,6 @@
 #pragma once
 #include <sstream>
-#include "Emu/Memory/Memory.h"
+#include "Emu/Memory/vm.h"
 #include "Emu/RSX/GL/GLVertexProgram.h"
 #include "Emu/RSX/GL/GLFragmentProgram.h"
 
@@ -26,7 +26,7 @@ typedef struct CgBinaryProgram          CgBinaryProgram;
 // fragment programs have their constants embedded in the microcode
 struct CgBinaryEmbeddedConstant
 {
-	be_t<u32> ucodeCount;       // occurances
+	be_t<u32> ucodeCount;       // occurrences
 	be_t<u32> ucodeOffset[1];   // offsets that need to be patched follow
 };
 
@@ -76,7 +76,7 @@ struct CgBinaryFragmentProgram
 	be_t<u16> texCoordsCentroid;       // tex coords that are centroid  (tex<n> is bit n)
 	u8        registerCount;           // R registers count
 	u8        outputFromH0;            // final color from R0 or H0
-	u8        depthReplace;            // fp generated z epth value
+	u8        depthReplace;            // fp generated z depth value
 	u8        pixelKill;               // fp uses kill operations
 };
 
@@ -309,7 +309,7 @@ public:
 
 				m_arb_shader += fmt::format("#%d ", i) + param_type + param_name + param_semantic + param_const + "\n";
 
-				offset += SIZE_32(CgBinaryParameter);
+				offset += sizeof(CgBinaryParameter);
 			}
 
 			m_arb_shader += "\n";
@@ -335,7 +335,7 @@ public:
 				u32 ctrl = (vmfprog.outputFromH0 ? 0 : 0x40) | (vmfprog.depthReplace ? 0xe : 0);
 				std::vector<rsx::texture_dimension_extended> td;
 				RSXFragmentProgram prog;
-				prog.size = 0, prog.addr = vm::base(ptr + vmprog.ucode), prog.offset = 0, prog.ctrl = ctrl;
+				prog.ucode_length = 0, prog.addr = vm::base(ptr + vmprog.ucode), prog.offset = 0, prog.ctrl = ctrl;
 				GLFragmentDecompilerThread(m_glsl_shader, param_array, prog, size).Task();
 				vm::close();
 			}
@@ -366,7 +366,7 @@ public:
 
 				m_arb_shader += fmt::format("#%d ", i) + param_type + param_name + param_semantic + param_const + "\n";
 
-				offset += SIZE_32(CgBinaryParameter);
+				offset += sizeof(CgBinaryParameter);
 			}
 
 			m_arb_shader += "\n";

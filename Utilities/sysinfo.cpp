@@ -13,6 +13,12 @@ bool utils::has_ssse3()
 	return g_value;
 }
 
+bool utils::has_sse41()
+{
+	static const bool g_value = get_cpuid(0, 0)[0] >= 0x1 && get_cpuid(1, 0)[2] & 0x80000;
+	return g_value;
+}
+
 bool utils::has_avx()
 {
 	static const bool g_value = get_cpuid(0, 0)[0] >= 0x1 && get_cpuid(1, 0)[2] & 0x10000000 && (get_cpuid(1, 0)[2] & 0x0C000000) == 0x0C000000 && (get_xgetbv(0) & 0x6) == 0x6;
@@ -27,8 +33,13 @@ bool utils::has_avx2()
 
 bool utils::has_rtm()
 {
-	// Check RTM and MPX extensions in order to filter out TSX on Haswell CPUs
-	static const bool g_value = get_cpuid(0, 0)[0] >= 0x7 && (get_cpuid(7, 0)[1] & 0x4800) == 0x4800;
+	static const bool g_value = get_cpuid(0, 0)[0] >= 0x7 && (get_cpuid(7, 0)[1] & 0x800) == 0x800;
+	return g_value;
+}
+
+bool utils::has_mpx()
+{
+	static const bool g_value = get_cpuid(0, 0)[0] >= 0x7 && (get_cpuid(7, 0)[1] & 0x4000) == 0x4000;
 	return g_value;
 }
 
@@ -62,8 +73,9 @@ std::string utils::get_system_info()
 		brand = "Unknown CPU";
 	}
 
-	brand.erase(0, brand.find_first_not_of(' '));
+	brand.erase(brand.find_last_not_of('\0') + 1);
 	brand.erase(brand.find_last_not_of(' ') + 1);
+	brand.erase(0, brand.find_first_not_of(' '));
 
 	while (auto found = brand.find("  ") + 1)
 	{
@@ -108,6 +120,10 @@ std::string utils::get_system_info()
 	if (has_rtm())
 	{
 		result += " | TSX";
+		if (!has_mpx())
+		{
+			result += " disabled by default";
+		}
 	}
 
 	return result;

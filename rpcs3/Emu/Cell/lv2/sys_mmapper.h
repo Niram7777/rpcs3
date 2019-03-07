@@ -1,9 +1,9 @@
 #pragma once
 
 #include "sys_sync.h"
-#include "sys_memory.h"
+#include <vector>
 
-#include <list>
+struct lv2_memory_container;
 
 struct lv2_memory : lv2_obj
 {
@@ -13,19 +13,11 @@ struct lv2_memory : lv2_obj
 	const u32 align; // Alignment required
 	const u64 flags;
 	const std::shared_ptr<lv2_memory_container> ct; // Associated memory container
+	const std::shared_ptr<utils::shm> shm;
 
-	atomic_t<u32> addr{}; // Actual mapping address
+	atomic_t<u32> counter{0};
 
-	std::vector<uchar> data;
-
-	lv2_memory(u32 size, u32 align, u64 flags, const std::shared_ptr<lv2_memory_container>& ct)
-		: size(size)
-		, align(align)
-		, flags(flags)
-		, ct(ct)
-	{
-		data.resize(size);
-	}
+	lv2_memory(u32 size, u32 align, u64 flags, const std::shared_ptr<lv2_memory_container>& ct);
 };
 
 enum : u64
@@ -33,13 +25,13 @@ enum : u64
 	SYS_MEMORY_PAGE_FAULT_EVENT_KEY	       = 0xfffe000000000000ULL,
 };
 
-enum : u32
+enum : u64
 {
-	SYS_MEMORY_PAGE_FAULT_CAUSE_NON_MAPPED = 0x00000002U,
-	SYS_MEMORY_PAGE_FAULT_CAUSE_READ_ONLY  = 0x00000001U,
-	SYS_MEMORY_PAGE_FAULT_TYPE_PPU_THREAD  = 0x00000000U,
-	SYS_MEMORY_PAGE_FAULT_TYPE_SPU_THREAD  = 0x00000001U,
-	SYS_MEMORY_PAGE_FAULT_TYPE_RAW_SPU     = 0x00000002U,
+	SYS_MEMORY_PAGE_FAULT_CAUSE_NON_MAPPED = 0x2ULL,
+	SYS_MEMORY_PAGE_FAULT_CAUSE_READ_ONLY  = 0x1ULL,
+	SYS_MEMORY_PAGE_FAULT_TYPE_PPU_THREAD  = 0x0ULL,
+	SYS_MEMORY_PAGE_FAULT_TYPE_SPU_THREAD  = 0x1ULL,
+	SYS_MEMORY_PAGE_FAULT_TYPE_RAW_SPU     = 0x2ULL,
 };
 
 struct page_fault_notification_entry
@@ -52,7 +44,7 @@ struct page_fault_notification_entry
 // Used to hold list of queues to be notified on page fault event.
 struct page_fault_notification_entries
 {
-	std::list<page_fault_notification_entry> entries;
+	std::vector<page_fault_notification_entry> entries;
 };
 
 struct page_fault_event
@@ -63,8 +55,8 @@ struct page_fault_event
 
 struct page_fault_event_entries
 {
-	std::list<page_fault_event> events;
-	semaphore<> pf_mutex;
+	std::vector<page_fault_event> events;
+	shared_mutex pf_mutex;
 };
 
 // SysCalls

@@ -1,5 +1,5 @@
-#include "stdafx.h"
-#include "Emu/Memory/Memory.h"
+﻿#include "stdafx.h"
+#include "Emu/Memory/vm.h"
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
 #include "RSXThread.h"
@@ -8,13 +8,22 @@
 
 #include "Common/BufferUtils.h"
 #include "Common/texture_cache.h"
+#include "Common/surface_store.h"
+#include "Capture/rsx_capture.h"
 #include "rsx_methods.h"
 #include "rsx_utils.h"
+#include "Emu/Cell/lv2/sys_event.h"
+#include "Emu/Cell/Modules/cellGcmSys.h"
 
 #include "Utilities/GSL.h"
 #include "Utilities/StrUtil.h"
 
+#include <cereal/archives/binary.hpp>
+
+#include <sstream>
 #include <thread>
+#include <unordered_set>
+#include <exception>
 #include <fenv.h>
 
 class GSRender;
@@ -22,15 +31,18 @@ class GSRender;
 #define CMD_DEBUG 0
 
 bool user_asked_for_frame_capture = false;
-rsx::frame_capture_data frame_debug;
+bool capture_current_frame = false;
+rsx::frame_trace_data frame_debug;
+rsx::frame_capture_data frame_capture;
+RSXIOTable RSXIOMem;
 
-
+extern CellGcmOffsetTable offsetTable;
+extern thread_local std::string(*g_tls_log_prefix)();
 
 namespace rsx
 {
 	std::function<bool(u32 addr, bool is_writing)> g_access_violation_handler;
-
-	//TODO: Restore a working shaders cache
+	thread* g_current_renderer = nullptr;
 
 	u32 get_address(u32 offset, u32 location)
 	{
@@ -56,7 +68,7 @@ namespace rsx
 		}
 
 		case CELL_GCM_CONTEXT_DMA_REPORT_LOCATION_LOCAL:
-			return 0x40301400 + offset;
+			return get_current_renderer()->label_addr + 0x1400 + offset;
 
 		case CELL_GCM_CONTEXT_DMA_REPORT_LOCATION_MAIN:
 		{
@@ -76,24 +88,19 @@ namespace rsx
 
 		case CELL_GCM_CONTEXT_DMA_SEMAPHORE_RW:
 		case CELL_GCM_CONTEXT_DMA_SEMAPHORE_R:
-			return 0x40300000 + offset;
+			return get_current_renderer()->label_addr + offset;
 
 		case CELL_GCM_CONTEXT_DMA_DEVICE_RW:
-			return 0x40000000 + offset;
+			return get_current_renderer()->ctxt_addr + offset;
 
 		case CELL_GCM_CONTEXT_DMA_DEVICE_R:
-			return 0x40000000 + offset;
+			return get_current_renderer()->ctxt_addr + offset;
 
 		default:
+		{
 			fmt::throw_exception("Invalid location (offset=0x%x, location=0x%x)" HERE, offset, location);
 		}
-	}
-
-	// The rsx internally adds the 'data_base_offset' and the 'vert_offset' and masks it 
-	// before actually attempting to translate to the internal address. Seen happening heavily in R&C games
-	u32 get_vertex_offset_from_base(u32 vert_data_base_offset, u32 vert_base_offset)
-	{
-		return ((u64)vert_data_base_offset + vert_base_offset) & 0xFFFFFFF;
+		}
 	}
 
 	u32 get_vertex_type_size_on_host(vertex_base_type type, u32 size)
@@ -245,39 +252,28 @@ namespace rsx
 
 	thread::thread()
 	{
+		g_current_renderer = this;
 		g_access_violation_handler = [this](u32 address, bool is_writing)
 		{
 			return on_access_violation(address, is_writing);
 		};
+
 		m_rtts_dirty = true;
 		memset(m_textures_dirty, -1, sizeof(m_textures_dirty));
 		memset(m_vertex_textures_dirty, -1, sizeof(m_vertex_textures_dirty));
-		m_transform_constants_dirty = true;
+
+		m_graphics_state = pipeline_state::all_dirty;
 	}
 
 	thread::~thread()
 	{
 		g_access_violation_handler = nullptr;
+		g_current_renderer = nullptr;
 	}
 
 	void thread::capture_frame(const std::string &name)
 	{
-		frame_capture_data::draw_state draw_state = {};
-
-		int clip_w = rsx::method_registers.surface_clip_width();
-		int clip_h = rsx::method_registers.surface_clip_height();
-		draw_state.state = rsx::method_registers;
-		draw_state.color_buffer = std::move(copy_render_targets_to_memory());
-		draw_state.depth_stencil = std::move(copy_depth_stencil_buffer_to_memory());
-
-		if (draw_state.state.current_draw_clause.command == rsx::draw_command::indexed)
-		{
-			draw_state.vertex_count = 0;
-			draw_state.vertex_count = draw_state.state.current_draw_clause.get_elements_count();
-			auto index_raw_data_ptr = get_raw_index_array(draw_state.state.current_draw_clause.first_count_commands);
-			draw_state.index.resize(index_raw_data_ptr.size_bytes());
-			std::copy(index_raw_data_ptr.begin(), index_raw_data_ptr.end(), draw_state.index.begin());
-		}
+		frame_trace_data::draw_state draw_state = {};
 
 		draw_state.programs = get_programs();
 		draw_state.name = name;
@@ -286,23 +282,25 @@ namespace rsx
 
 	void thread::begin()
 	{
-		rsx::method_registers.current_draw_clause.inline_vertex_array.resize(0);
-		in_begin_end = true;
-
-		switch (rsx::method_registers.current_draw_clause.primitive)
+		if (conditional_render_enabled && conditional_render_test_address)
 		{
-		case rsx::primitive_type::line_loop:
-		case rsx::primitive_type::line_strip:
-		case rsx::primitive_type::polygon:
-		case rsx::primitive_type::quad_strip:
-		case rsx::primitive_type::triangle_fan:
-		case rsx::primitive_type::triangle_strip:
-			// Adjacency matters for these types
-			rsx::method_registers.current_draw_clause.is_disjoint_primitive = false;
-			break;
-		default:
-			rsx::method_registers.current_draw_clause.is_disjoint_primitive = true;
+			// Evaluate conditional rendering test
+			zcull_ctrl->read_barrier(this, conditional_render_test_address, 4);
+			vm::ptr<CellGcmReportData> result = vm::cast(conditional_render_test_address);
+			conditional_render_test_failed = (result->value == 0);
+			conditional_render_test_address = 0;
 		}
+
+		if (m_graphics_state & rsx::pipeline_state::fragment_program_dirty)
+		{
+			// Request for update of fragment constants if the program block is invalidated
+			m_graphics_state |= rsx::pipeline_state::fragment_constants_dirty;
+
+			// Request for update of texture parameters if the program is likely to have changed
+			m_graphics_state |= rsx::pipeline_state::fragment_texture_state_dirty;
+		}
+
+		in_begin_end = true;
 	}
 
 	void thread::append_to_push_buffer(u32 attribute, u32 size, u32 subreg_index, vertex_base_type type, u32 value)
@@ -337,17 +335,26 @@ namespace rsx
 
 	void thread::end()
 	{
-		in_begin_end = false;
+		if (capture_current_frame)
+			capture::capture_draw_memory(this);
 
-		for (u8 index = 0; index < rsx::limits::vertex_count; ++index)
+		in_begin_end = false;
+		m_draw_calls++;
+
+		method_registers.current_draw_clause.post_execute_cleanup();
+
+		m_graphics_state |= rsx::pipeline_state::framebuffer_reads_dirty;
+		ROP_sync_timestamp = get_system_time();
+
+		for (auto & push_buf : vertex_push_buffers)
 		{
 			//Disabled, see https://github.com/RPCS3/rpcs3/issues/1932
 			//rsx::method_registers.register_vertex_info[index].size = 0;
 
-			vertex_push_buffers[index].clear();
+			push_buf.clear();
 		}
 
-		element_push_buffer.resize(0);
+		element_push_buffer.clear();
 
 		if (zcull_ctrl->active)
 			zcull_ctrl->on_draw();
@@ -359,11 +366,75 @@ namespace rsx
 		}
 	}
 
+	void thread::execute_nop_draw()
+	{
+		method_registers.current_draw_clause.begin();
+		do
+		{
+			method_registers.current_draw_clause.execute_pipeline_dependencies();
+		}
+		while (method_registers.current_draw_clause.next());
+	}
+
+	void thread::operator()()
+	{
+		try
+		{
+			// Wait for startup (TODO)
+			while (m_rsx_thread_exiting)
+			{
+				thread_ctrl::wait_for(1000);
+
+				if (Emu.IsStopped())
+				{
+					return;
+				}
+			}
+
+			on_task();
+		}
+		catch (const std::exception& e)
+		{
+			LOG_FATAL(RSX, "%s thrown: %s", typeid(e).name(), e.what());
+			Emu.Pause();
+		}
+
+		on_exit();
+	}
+
 	void thread::on_task()
 	{
+		m_rsx_thread = std::this_thread::get_id();
+
+		g_tls_log_prefix = []
+		{
+			const auto rsx = get_current_renderer();
+			return fmt::format("RSX [0x%07x]", +rsx->ctrl->get);
+		};
+
+		if (supports_native_ui)
+		{
+			m_overlay_manager = fxm::make_always<rsx::overlays::display_manager>();
+
+			if (g_cfg.video.perf_overlay.perf_overlay_enabled)
+			{
+				auto perf_overlay = m_overlay_manager->create<rsx::overlays::perf_metrics_overlay>();
+
+				auto& perf_settings = g_cfg.video.perf_overlay;
+				perf_overlay->set_detail_level(perf_settings.level);
+				perf_overlay->set_position(perf_settings.position);
+				perf_overlay->set_update_interval(perf_settings.update_interval);
+				perf_overlay->set_font(perf_settings.font);
+				perf_overlay->set_font_size(perf_settings.font_size);
+				perf_overlay->set_margins(perf_settings.margin_x, perf_settings.margin_y);
+				perf_overlay->set_opacity(perf_settings.opacity / 100.f);
+				perf_overlay->init();
+			}
+		}
+
 		on_init_thread();
 
-		reset();
+		method_registers.init();
 
 		if (!zcull_ctrl)
 		{
@@ -371,9 +442,11 @@ namespace rsx
 			zcull_ctrl = std::make_unique<::rsx::reports::ZCULL_control>();
 		}
 
+		fifo_ctrl = std::make_unique<::rsx::FIFO::FIFO_control>(this);
+
 		last_flip_time = get_system_time() - 1000000;
 
-		thread_ctrl::spawn(m_vblank_thread, "VBlank Thread", [this]()
+		thread_ctrl::spawn("VBlank Thread", [this]()
 		{
 			const u64 start_time = get_system_time();
 
@@ -395,7 +468,7 @@ namespace rsx
 							{ ppu_cmd::sleep, 0 }
 						});
 
-						intr_thread->notify();
+						thread_ctrl::notify(*intr_thread);
 					}
 
 					continue;
@@ -406,6 +479,39 @@ namespace rsx
 
 				std::this_thread::sleep_for(1ms); // hack
 			}
+		});
+
+		thread_ctrl::spawn("RSX Decompiler Thread", [this]
+		{
+			if (g_cfg.video.disable_asynchronous_shader_compiler)
+			{
+				// Die
+				return;
+			}
+
+			on_decompiler_init();
+
+			if (g_cfg.core.thread_scheduler_enabled)
+			{
+				thread_ctrl::set_thread_affinity_mask(thread_ctrl::get_affinity_mask(thread_class::rsx));
+			}
+
+			while (!Emu.IsStopped() && !m_rsx_thread_exiting)
+			{
+				if (!on_decompiler_task())
+				{
+					if (Emu.IsPaused())
+					{
+						std::this_thread::sleep_for(1ms);
+					}
+					else
+					{
+						std::this_thread::sleep_for(500us);
+					}
+				}
+			}
+
+			on_decompiler_exit();
 		});
 
 		// Raise priority above other threads
@@ -419,459 +525,45 @@ namespace rsx
 		// Round to nearest to deal with forward/reverse scaling
 		fesetround(FE_TONEAREST);
 
-		// Deferred calls are used to batch draws together
-		u32 deferred_primitive_type = 0;
-		u32 deferred_call_size = 0;
-		s32 deferred_begin_end = 0;
-		std::vector<u32> deferred_stack;
-		bool has_deferred_call = false;
-
-		// Track register address faults
-		u32 mem_faults_count = 0;
-
-		auto flush_command_queue = [&]()
-		{
-			const auto num_draws = (u32)method_registers.current_draw_clause.first_count_commands.size();
-			bool emit_begin = false;
-			bool emit_end = true;
-
-			if (num_draws > 1)
-			{
-				auto& first_counts = method_registers.current_draw_clause.first_count_commands;
-				deferred_stack.resize(0);
-
-				u32 last = first_counts.front().first;
-				u32 last_index = 0;
-
-				for (u32 draw = 0; draw < num_draws; draw++)
-				{
-					if (first_counts[draw].first != last)
-					{
-						//Disjoint
-						deferred_stack.push_back(draw);
-					}
-
-					last = first_counts[draw].first + first_counts[draw].second;
-				}
-
-				if (deferred_stack.size() > 0)
-				{
-					LOG_TRACE(RSX, "Disjoint draw range detected");
-
-					deferred_stack.push_back(num_draws); //Append last pair
-					std::vector<std::pair<u32, u32>> temp_range = first_counts;
-					auto current_command = rsx::method_registers.current_draw_clause.command;
-
-					u32 last_index = 0;
-
-					for (const u32 draw : deferred_stack)
-					{
-						if (emit_begin)
-							methods[NV4097_SET_BEGIN_END](this, NV4097_SET_BEGIN_END, deferred_primitive_type);
-						else
-							emit_begin = true;
-
-						//NOTE: These values are reset if begin command is emitted
-						first_counts.resize(draw - last_index);
-						std::copy(temp_range.begin() + last_index, temp_range.begin() + draw, first_counts.begin());
-						rsx::method_registers.current_draw_clause.command = current_command;
-
-						methods[NV4097_SET_BEGIN_END](this, NV4097_SET_BEGIN_END, 0);
-						last_index = draw;
-					}
-
-					emit_end = false;
-				}
-			}
-
-			if (emit_end)
-				methods[NV4097_SET_BEGIN_END](this, NV4097_SET_BEGIN_END, 0);
-
-			if (deferred_begin_end > 0) //Hanging draw call (useful for immediate rendering where the begin call needs to be noted)
-				methods[NV4097_SET_BEGIN_END](this, NV4097_SET_BEGIN_END, deferred_primitive_type);
-
-			deferred_begin_end = 0;
-			deferred_primitive_type = 0;
-			deferred_call_size = 0;
-			has_deferred_call = false;
-		};
-
 		// TODO: exit condition
 		while (!Emu.IsStopped())
 		{
-			//Wait for external pause events
+			// Wait for external pause events
 			if (external_interrupt_lock.load())
 			{
 				external_interrupt_ack.store(true);
 				while (external_interrupt_lock.load()) _mm_pause();
 			}
 
-			//Execute backend-local tasks first
-			do_local_task(ctrl->put.load() == internal_get.load());
+			// Idle if emulation paused
+			if (Emu.IsPaused())
+			{
+				std::this_thread::sleep_for(1ms);
+				continue;
+			}
 
-			//Update sub-units
-			zcull_ctrl->update(this);
-
-			//Set up restore state if needed
+			// Note a possible rollback address
 			if (sync_point_request)
 			{
-				if (RSXIOMem.RealAddr(internal_get))
-				{
-					//New internal get is valid, use it
-					restore_point = internal_get.load();
-				}
-				else
-				{
-					LOG_ERROR(RSX, "Could not update FIFO restore point");
-				}
-
+				restore_point = ctrl->get;
+				restore_ret = m_return_addr;
 				sync_point_request = false;
 			}
 
-			//Now load the FIFO ctrl registers
-			ctrl->get.store(internal_get.load());
-			const u32 put = ctrl->put;
+			// Execute backend-local tasks first
+			do_local_task(performance_counters.state);
 
-			if (put == internal_get || !Emu.IsRunning())
-			{
-				if (has_deferred_call)
-				{
-					flush_command_queue();
-				}
-				else if (!performance_counters.FIFO_is_idle)
-				{
-					performance_counters.FIFO_idle_timestamp = get_system_time();
-					performance_counters.FIFO_is_idle = true;
-				}
-				else
-				{
-					do_internal_task();
-				}
+			// Update sub-units
+			zcull_ctrl->update(this);
 
-				continue;
-			}
-
-			if (performance_counters.FIFO_is_idle)
-			{
-				//Update performance counters with time spent in idle mode
-				performance_counters.FIFO_is_idle = false;
-				performance_counters.idle_time += (get_system_time() - performance_counters.FIFO_idle_timestamp);
-			}
-
-			//Validate put and get registers
-			//TODO: Who should handle graphics exceptions??
-			const u32 get_address = RSXIOMem.RealAddr(internal_get);
-
-			if (!get_address)
-			{
-				LOG_ERROR(RSX, "Invalid FIFO queue get/put registers found, get=0x%X, put=0x%X", internal_get.load(), put);
-
-				if (mem_faults_count >= 3)
-				{
-					LOG_ERROR(RSX, "Application has failed to recover, resetting FIFO queue");
-					internal_get = restore_point.load();;
-				}
-				else
-				{
-					mem_faults_count++;
-					std::this_thread::sleep_for(10ms);
-				}
-
-				invalid_command_interrupt_raised = true;
-				continue;
-			}
-
-			const u32 cmd = ReadIO32(internal_get);
-			const u32 count = (cmd >> 18) & 0x7ff;
-
-			if ((cmd & RSX_METHOD_OLD_JUMP_CMD_MASK) == RSX_METHOD_OLD_JUMP_CMD)
-			{
-				u32 offs = cmd & 0x1ffffffc;
-				//LOG_WARNING(RSX, "rsx jump(0x%x) #addr=0x%x, cmd=0x%x, get=0x%x, put=0x%x", offs, m_ioAddress + get, cmd, get, put);
-				internal_get = offs;
-				continue;
-			}
-			if ((cmd & RSX_METHOD_NEW_JUMP_CMD_MASK) == RSX_METHOD_NEW_JUMP_CMD)
-			{
-				u32 offs = cmd & 0xfffffffc;
-				//LOG_WARNING(RSX, "rsx jump(0x%x) #addr=0x%x, cmd=0x%x, get=0x%x, put=0x%x", offs, m_ioAddress + get, cmd, get, put);
-				internal_get = offs;
-				continue;
-			}
-			if ((cmd & RSX_METHOD_CALL_CMD_MASK) == RSX_METHOD_CALL_CMD)
-			{
-				m_call_stack.push(internal_get + 4);
-				u32 offs = cmd & ~3;
-				//LOG_WARNING(RSX, "rsx call(0x%x) #0x%x - 0x%x", offs, cmd, get);
-				internal_get = offs;
-				continue;
-			}
-			if (cmd == RSX_METHOD_RETURN_CMD)
-			{
-				if (m_call_stack.size() == 0)
-				{
-					LOG_ERROR(RSX, "FIFO: RET found without corresponding CALL. Discarding queue");
-					internal_get = put;
-					continue;
-				}
-
-				u32 get = m_call_stack.top();
-				m_call_stack.pop();
-				//LOG_WARNING(RSX, "rsx return(0x%x)", get);
-				internal_get = get;
-				continue;
-			}
-			if (cmd == 0) //nop
-			{
-				internal_get += 4;
-				continue;
-			}
-
-			//Validate the args ptr if the command attempts to read from it
-			const u32 args_address = RSXIOMem.RealAddr(internal_get + 4);
-
-			if (!args_address && count)
-			{
-				LOG_ERROR(RSX, "Invalid FIFO queue args ptr found, get=0x%X, cmd=0x%X, count=%d", internal_get.load(), cmd, count);
-
-				if (mem_faults_count >= 3)
-				{
-					LOG_ERROR(RSX, "Application has failed to recover, resetting FIFO queue");
-					internal_get = restore_point.load();
-				}
-				else
-				{
-					mem_faults_count++;
-					std::this_thread::sleep_for(10ms);
-				}
-
-				invalid_command_interrupt_raised = true;
-				continue;
-			}
-
-			// All good on valid memory ptrs
-			mem_faults_count = 0;
-
-			auto args = vm::ptr<u32>::make(args_address);
-			invalid_command_interrupt_raised = false;
-			bool unaligned_command = false;
-
-			u32 first_cmd = (cmd & 0xfffc) >> 2;
-
-			if (cmd & 0x3)
-			{
-				LOG_WARNING(RSX, "unaligned command: %s (0x%x from 0x%x)", get_method_name(first_cmd).c_str(), first_cmd, cmd & 0xffff);
-				unaligned_command = true;
-			}
-
-			// Not sure if this is worth trying to fix, but if it happens, its bad
-			// so logging it until its reported
-			if (internal_get < put && ((internal_get + (count + 1) * 4) > put))
-				LOG_ERROR(RSX, "Get pointer jumping over put pointer! This is bad!");
-
-			for (u32 i = 0; i < count; i++)
-			{
-				u32 reg = ((cmd & RSX_METHOD_NON_INCREMENT_CMD_MASK) == RSX_METHOD_NON_INCREMENT_CMD) ? first_cmd : first_cmd + i;
-				u32 value = args[i];
-
-				bool execute_method_call = true;
-
-				//TODO: Flatten draw calls when multidraw is not supported to simplify checking in the end() methods
-				if (supports_multidraw)
-				{
-					//TODO: Make this cleaner
-					bool flush_commands_flag = has_deferred_call;
-
-					switch (reg)
-					{
-					case NV4097_SET_BEGIN_END:
-					{
-						// Hook; Allows begin to go through, but ignores end
-						if (value)
-							deferred_begin_end++;
-						else
-							deferred_begin_end--;
-
-						if (value && value != deferred_primitive_type)
-							deferred_primitive_type = value;
-						else
-						{
-							has_deferred_call = true;
-							flush_commands_flag = false;
-							execute_method_call = false;
-
-							deferred_call_size++;
-
-							if (!method_registers.current_draw_clause.is_disjoint_primitive)
-							{
-								// Combine all calls since the last one
-								auto &first_count = method_registers.current_draw_clause.first_count_commands;
-								if (first_count.size() > deferred_call_size)
-								{
-									const auto &batch_first_count = first_count[deferred_call_size - 1];
-									u32 count = batch_first_count.second;
-									u32 next = batch_first_count.first + count;
-
-									for (int n = deferred_call_size; n < first_count.size(); n++)
-									{
-										if (first_count[n].first != next)
-										{
-											LOG_ERROR(RSX, "Non-continous first-count range passed as one draw; will be split.");
-
-											first_count[deferred_call_size - 1].second = count;
-											deferred_call_size++;
-
-											count = first_count[deferred_call_size - 1].second;
-											next = first_count[deferred_call_size - 1].first + count;
-											continue;
-										}
-
-										count += first_count[n].second;
-										next += first_count[n].second;
-									}
-
-									first_count[deferred_call_size - 1].second = count;
-									first_count.resize(deferred_call_size);
-								}
-							}
-						}
-
-						break;
-					}
-					// These commands do not alter the pipeline state and deferred calls can still be active
-					// TODO: Add more commands here
-					case NV4097_INVALIDATE_VERTEX_FILE:
-						flush_commands_flag = false;
-						break;
-					case NV4097_DRAW_ARRAYS:
-					{
-						const auto cmd = method_registers.current_draw_clause.command;
-						if (cmd != rsx::draw_command::array && cmd != rsx::draw_command::none)
-							break;
-
-						flush_commands_flag = false;
-						break;
-					}
-					case NV4097_DRAW_INDEX_ARRAY:
-					{
-						const auto cmd = method_registers.current_draw_clause.command;
-						if (cmd != rsx::draw_command::indexed && cmd != rsx::draw_command::none)
-							break;
-
-						flush_commands_flag = false;
-						break;
-					}
-					default:
-					{
-						//TODO: Reorder draw commands between synchronization events to maximize batched sizes
-						static const std::pair<u32, u32> skippable_ranges[] =
-						{
-							//Texture configuration
-							{ NV4097_SET_TEXTURE_OFFSET, 8 * 16 },
-							{ NV4097_SET_TEXTURE_CONTROL2, 16 },
-							{ NV4097_SET_TEXTURE_CONTROL3, 16 },
-							{ NV4097_SET_VERTEX_TEXTURE_OFFSET, 8 * 4 },
-							//Surface configuration
-							{ NV4097_SET_SURFACE_CLIP_HORIZONTAL, 1 },
-							{ NV4097_SET_SURFACE_CLIP_VERTICAL, 1 },
-							{ NV4097_SET_SURFACE_COLOR_AOFFSET, 1 },
-							{ NV4097_SET_SURFACE_COLOR_BOFFSET, 1 },
-							{ NV4097_SET_SURFACE_COLOR_COFFSET, 1 },
-							{ NV4097_SET_SURFACE_COLOR_DOFFSET, 1 },
-							{ NV4097_SET_SURFACE_ZETA_OFFSET, 1 },
-							{ NV4097_SET_CONTEXT_DMA_COLOR_A, 1 },
-							{ NV4097_SET_CONTEXT_DMA_COLOR_B, 1 },
-							{ NV4097_SET_CONTEXT_DMA_COLOR_C, 1 },
-							{ NV4097_SET_CONTEXT_DMA_COLOR_D, 1 },
-							{ NV4097_SET_CONTEXT_DMA_ZETA, 1 },
-							{ NV4097_SET_SURFACE_FORMAT, 1 },
-							{ NV4097_SET_SURFACE_PITCH_A, 1 },
-							{ NV4097_SET_SURFACE_PITCH_B, 1 },
-							{ NV4097_SET_SURFACE_PITCH_C, 1 },
-							{ NV4097_SET_SURFACE_PITCH_D, 1 },
-							{ NV4097_SET_SURFACE_PITCH_Z, 1 }
-						};
-
-						if (has_deferred_call)
-						{
-							//Hopefully this is skippable so the batch can keep growing
-							for (const auto &method : skippable_ranges)
-							{
-								if (reg < method.first)
-									continue;
-
-								if (reg - method.first < method.second)
-								{
-									//Safe to ignore if value has not changed
-									if (method_registers.test(reg, value))
-									{
-										execute_method_call = false;
-										flush_commands_flag = false;
-									}
-
-									break;
-								}
-							}
-						}
-
-						break;
-					}
-					}
-
-					if (flush_commands_flag)
-					{
-						flush_command_queue();
-					}
-				}
-
-				method_registers.decode(reg, value);
-
-				if (capture_current_frame)
-				{
-					frame_debug.command_queue.push_back(std::make_pair(reg, value));
-				}
-
-				if (execute_method_call)
-				{
-					if (auto method = methods[reg])
-					{
-						method(this, reg, value);
-					}
-				}
-
-				if (invalid_command_interrupt_raised)
-				{
-					//Skip the rest of this command
-					break;
-				}
-			}
-
-			if (unaligned_command && invalid_command_interrupt_raised)
-			{
-				//This is almost guaranteed to be heap corruption at this point
-				//Ignore the rest of the chain
-				LOG_ERROR(RSX, "FIFO contents may be corrupted. Resetting...");
-				internal_get = restore_point.load();
-				continue;
-			}
-
-			internal_get += (count + 1) * 4;
+			// Execute FIFO queue
+			run_FIFO();
 		}
 	}
 
 	void thread::on_exit()
 	{
 		m_rsx_thread_exiting = true;
-		if (m_vblank_thread)
-		{
-			m_vblank_thread->join();
-			m_vblank_thread.reset();
-		}
-	}
-
-	std::string thread::get_name() const
-	{
-		return "rsx::thread";
 	}
 
 	void thread::fill_scale_offset_data(void *buffer, bool flip_y) const
@@ -911,8 +603,9 @@ namespace rsx
 			rsx::method_registers.clip_plane_5_enabled(),
 		};
 
-		s32 clip_enabled_flags[8] = {};
-		f32 clip_distance_factors[8] = {};
+		u8 data_block[64];
+		s32* clip_enabled_flags = reinterpret_cast<s32*>(data_block);
+		f32* clip_distance_factors = reinterpret_cast<f32*>(data_block + 32);
 
 		for (int index = 0; index < 6; ++index)
 		{
@@ -938,8 +631,7 @@ namespace rsx
 			}
 		}
 
-		memcpy(buffer, clip_enabled_flags, 32);
-		memcpy((char*)buffer + 32, clip_distance_factors, 32);
+		memcpy(buffer, data_block, 2 * 8 * sizeof(u32));
 	}
 
 	/**
@@ -956,20 +648,21 @@ namespace rsx
 		//TODO: Properly support alpha-to-coverage and alpha-to-one behavior in shaders
 		auto fragment_alpha_func = rsx::method_registers.alpha_func();
 		auto alpha_ref = rsx::method_registers.alpha_ref() / 255.f;
-		auto rop_control = (u32)rsx::method_registers.alpha_test_enabled();
+		auto rop_control = rsx::method_registers.alpha_test_enabled()? 1u : 0u;
 
-		if (rsx::method_registers.msaa_alpha_to_coverage_enabled() && !rop_control)
+		if (rsx::method_registers.msaa_alpha_to_coverage_enabled() &&
+			rsx::method_registers.msaa_enabled() &&
+			rsx::method_registers.surface_antialias() != rsx::surface_antialiasing::center_1_sample)
 		{
-			if (rsx::method_registers.msaa_enabled() &&
-				rsx::method_registers.surface_antialias() != rsx::surface_antialiasing::center_1_sample)
-			{
-				//alpha values generate a coverage mask for order independent blending
-				//requires hardware AA to work properly (or just fragment sample stage in fragment shaders)
-				//simulated using combined alpha blend and alpha test
-				fragment_alpha_func = rsx::comparison_function::greater;
-				alpha_ref = rsx::method_registers.msaa_sample_mask()? 0.25f : 0.f;
-				rop_control |= (1 << 4);
-			}
+			// Alpha values generate a coverage mask for order independent blending
+			// Requires hardware AA to work properly (or just fragment sample stage in fragment shaders)
+			// Simulated using combined alpha blend and alpha test
+			const u32 mask_bit = rsx::method_registers.msaa_sample_mask() ? 1u : 0u;
+			const u32 samples_bit = rsx::method_registers.surface_antialias() != rsx::surface_antialiasing::diagonal_centered_2_samples ? 1u : 0u;
+
+			rop_control |= (1u << 4);                 // CSAA enable bit
+			rop_control |= (mask_bit << 5);           // MSAA mask enable bit
+			rop_control |= (samples_bit << 6);        // Sample configuration bit
 		}
 
 		const f32 fog0 = rsx::method_registers.fog_params_0();
@@ -978,9 +671,23 @@ namespace rsx
 		const u32 fog_mode = static_cast<u32>(rsx::method_registers.fog_equation());
 
 		rop_control |= (alpha_func << 16);
-		rop_control |= rsx::method_registers.framebuffer_srgb_enabled() ? 0x2 : 0;
 
-		// Generate wpos coeffecients
+		if (rsx::method_registers.framebuffer_srgb_enabled())
+		{
+			// Check if framebuffer is actually an XRGB format and not a WZYX format
+			switch (rsx::method_registers.surface_color())
+			{
+			case rsx::surface_color_format::w16z16y16x16:
+			case rsx::surface_color_format::w32z32y32x32:
+			case rsx::surface_color_format::x32:
+				break;
+			default:
+				rop_control |= (1u << 1);
+				break;
+			}
+		}
+
+		// Generate wpos coefficients
 		// wpos equation is now as follows:
 		// wpos.y = (frag_coord / resolution_scale) * ((window_origin!=top)?-1.: 1.) + ((window_origin!=top)? window_height : 0)
 		// wpos.x = (frag_coord / resolution_scale)
@@ -995,16 +702,11 @@ namespace rsx
 		u32 *dst = static_cast<u32*>(buffer);
 		stream_vector(dst, (u32&)fog0, (u32&)fog1, rop_control, (u32&)alpha_ref);
 		stream_vector(dst + 4, alpha_func, fog_mode, (u32&)wpos_scale, (u32&)wpos_bias);
+	}
 
-		size_t offset = 8;
-		for (int index = 0; index < 16; ++index)
-		{
-			stream_vector(&dst[offset],
-				(u32&)fragment_program.texture_scale[index][0], (u32&)fragment_program.texture_scale[index][1],
-				(u32&)fragment_program.texture_scale[index][2], (u32&)fragment_program.texture_scale[index][3]);
-
-			offset += 4;
-		}
+	void thread::fill_fragment_texture_parameters(void *buffer, const RSXFragmentProgram &fragment_program)
+	{
+		memcpy(buffer, fragment_program.texture_scale, 16 * 4 * sizeof(float));
 	}
 
 	void thread::write_inline_array_to_buffer(void *dst_buffer)
@@ -1044,13 +746,22 @@ namespace rsx
 		}
 	}
 
-	u64 thread::timestamp() const
+	u64 thread::timestamp()
 	{
 		// Get timestamp, and convert it from microseconds to nanoseconds
-		return get_system_time() * 1000;
+		const u64 t = get_system_time() * 1000;
+		if (t != timestamp_ctrl)
+		{
+			timestamp_ctrl = t;
+			timestamp_subvalue = 0;
+			return t;
+		}
+
+		timestamp_subvalue += 10;
+		return t + timestamp_subvalue;
 	}
 
-	gsl::span<const gsl::byte> thread::get_raw_index_array(const std::vector<std::pair<u32, u32> >& draw_indexed_clause) const
+	gsl::span<const gsl::byte> thread::get_raw_index_array(const draw_clause& draw_indexed_clause) const
 	{
 		if (element_push_buffer.size())
 		{
@@ -1065,43 +776,29 @@ namespace rsx
 		bool is_primitive_restart_enabled = rsx::method_registers.restart_index_enabled();
 		u32 primitive_restart_index = rsx::method_registers.restart_index();
 
-		// Disjoint first_counts ranges not supported atm
-		for (int i = 0; i < draw_indexed_clause.size() - 1; i++)
-		{
-			const std::tuple<u32, u32> &range = draw_indexed_clause[i];
-			const std::tuple<u32, u32> &next_range = draw_indexed_clause[i + 1];
-			verify(HERE), (std::get<0>(range) + std::get<1>(range) == std::get<0>(next_range));
-		}
-		u32 first = std::get<0>(draw_indexed_clause.front());
-		u32 count = std::get<0>(draw_indexed_clause.back()) + std::get<1>(draw_indexed_clause.back()) - first;
+		const u32 first = draw_indexed_clause.min_index();
+		const u32 count = draw_indexed_clause.get_elements_count();
 
 		const gsl::byte* ptr = static_cast<const gsl::byte*>(vm::base(address));
 		return{ ptr + first * type_size, count * type_size };
 	}
 
-	gsl::span<const gsl::byte> thread::get_raw_vertex_buffer(const rsx::data_array_format_info& vertex_array_info, u32 base_offset, const std::vector<std::pair<u32, u32>>& vertex_ranges) const
+	gsl::span<const gsl::byte> thread::get_raw_vertex_buffer(const rsx::data_array_format_info& vertex_array_info, u32 base_offset, const draw_clause& draw_array_clause) const
 	{
 		u32 offset  = vertex_array_info.offset();
 		u32 address = rsx::get_address(rsx::get_vertex_offset_from_base(base_offset, offset & 0x7fffffff), offset >> 31);
 
 		u32 element_size = rsx::get_vertex_type_size_on_host(vertex_array_info.type(), vertex_array_info.size());
 
-		// Disjoint first_counts ranges not supported atm
-		for (int i = 0; i < vertex_ranges.size() - 1; i++)
-		{
-			const std::tuple<u32, u32>& range      = vertex_ranges[i];
-			const std::tuple<u32, u32>& next_range = vertex_ranges[i + 1];
-			verify(HERE), (std::get<0>(range) + std::get<1>(range) == std::get<0>(next_range));
-		}
-		u32 first = std::get<0>(vertex_ranges.front());
-		u32 count = std::get<0>(vertex_ranges.back()) + std::get<1>(vertex_ranges.back()) - first;
+		const u32 first = draw_array_clause.min_index();
+		const u32 count = draw_array_clause.get_elements_count();
 
 		const gsl::byte* ptr = gsl::narrow_cast<const gsl::byte*>(vm::base(address));
 		return {ptr + first * vertex_array_info.stride(), count * vertex_array_info.stride() + element_size};
 	}
 
 	std::vector<std::variant<vertex_array_buffer, vertex_array_register, empty_vertex_array>>
-	thread::get_vertex_buffers(const rsx::rsx_state& state, const std::vector<std::pair<u32, u32>>& vertex_ranges, const u64 consumed_attrib_mask) const
+	thread::get_vertex_buffers(const rsx::rsx_state& state, const u64 consumed_attrib_mask) const
 	{
 		std::vector<std::variant<vertex_array_buffer, vertex_array_register, empty_vertex_array>> result;
 		result.reserve(rsx::limits::vertex_count);
@@ -1119,17 +816,17 @@ namespace rsx
 			{
 				const rsx::data_array_format_info& info = state.vertex_arrays_info[index];
 				result.push_back(vertex_array_buffer{info.type(), info.size(), info.stride(),
-					get_raw_vertex_buffer(info, state.vertex_data_base_offset(), vertex_ranges), index});
+					get_raw_vertex_buffer(info, state.vertex_data_base_offset(), state.current_draw_clause), index, true});
 				continue;
 			}
 
 			if (vertex_push_buffers[index].vertex_count > 1)
 			{
-				const rsx::register_vertex_data_info& info = state.register_vertex_info[index];
+				const auto& info = vertex_push_buffers[index];
 				const u8 element_size = info.size * sizeof(u32);
 
 				gsl::span<const gsl::byte> vertex_src = { (const gsl::byte*)vertex_push_buffers[index].data.data(), vertex_push_buffers[index].vertex_count * element_size };
-				result.push_back(vertex_array_buffer{ info.type, info.size, element_size, vertex_src, index });
+				result.push_back(vertex_array_buffer{ info.type, info.size, element_size, vertex_src, index, false });
 				continue;
 			}
 
@@ -1149,21 +846,22 @@ namespace rsx
 	std::variant<draw_array_command, draw_indexed_array_command, draw_inlined_array>
 	thread::get_draw_command(const rsx::rsx_state& state) const
 	{
-		if (rsx::method_registers.current_draw_clause.command == rsx::draw_command::array) {
-			return draw_array_command{
-				rsx::method_registers.current_draw_clause.first_count_commands};
+		if (rsx::method_registers.current_draw_clause.command == rsx::draw_command::array)
+		{
+			return draw_array_command{};
 		}
 
-		if (rsx::method_registers.current_draw_clause.command == rsx::draw_command::indexed) {
-			return draw_indexed_array_command{
-				rsx::method_registers.current_draw_clause.first_count_commands,
-				get_raw_index_array(
-					rsx::method_registers.current_draw_clause.first_count_commands)};
+		if (rsx::method_registers.current_draw_clause.command == rsx::draw_command::indexed)
+		{
+			return draw_indexed_array_command
+			{
+				get_raw_index_array(state.current_draw_clause)
+			};
 		}
 
-		if (rsx::method_registers.current_draw_clause.command == rsx::draw_command::inlined_array) {
-			return draw_inlined_array{
-				rsx::method_registers.current_draw_clause.inline_vertex_array};
+		if (rsx::method_registers.current_draw_clause.command == rsx::draw_command::inlined_array)
+		{
+			return draw_inlined_array{};
 		}
 
 		fmt::throw_exception("ill-formed draw command" HERE);
@@ -1171,12 +869,6 @@ namespace rsx
 
 	void thread::do_internal_task()
 	{
-		if (zcull_ctrl->has_pending())
-		{
-			zcull_ctrl->sync(this);
-			return;
-		}
-
 		if (m_internal_tasks.empty())
 		{
 			std::this_thread::yield();
@@ -1184,7 +876,7 @@ namespace rsx
 		else
 		{
 			fmt::throw_exception("Disabled" HERE);
-			//std::lock_guard<shared_mutex> lock{ m_mtx_task };
+			//std::lock_guard lock(m_mtx_task);
 
 			//internal_task_entry &front = m_internal_tasks.front();
 
@@ -1196,9 +888,31 @@ namespace rsx
 		}
 	}
 
+	void thread::do_local_task(FIFO_state state)
+	{
+		if (async_flip_requested & flip_request::emu_requested)
+		{
+			// NOTE: This has to be executed immediately
+			// Delaying this operation can cause desync due to the delay in firing the flip event
+			handle_emu_flip(async_flip_buffer);
+		}
+
+		if (!in_begin_end && state != FIFO_state::lock_wait)
+		{
+			reader_lock lock(m_mtx_task);
+
+			if (m_invalidated_memory_range.valid())
+			{
+				lock.upgrade();
+				handle_invalidated_memory_range();
+			}
+		}
+	}
+
+
 	//std::future<void> thread::add_internal_task(std::function<bool()> callback)
 	//{
-	//	std::lock_guard<shared_mutex> lock{ m_mtx_task };
+	//	std::lock_guard lock(m_mtx_task);
 	//	m_internal_tasks.emplace_back(callback);
 
 	//	return m_internal_tasks.back().promise.get_future();
@@ -1269,142 +983,456 @@ namespace rsx
 		return rsx::get_address(offset_zeta, m_context_dma_z);
 	}
 
-	void thread::get_current_vertex_program()
+	framebuffer_layout thread::get_framebuffer_layout(rsx::framebuffer_creation_context context)
 	{
-		const u32 transform_program_start = rsx::method_registers.transform_program_start();
-		current_vertex_program.output_mask = rsx::method_registers.vertex_attrib_output_mask();
-		current_vertex_program.skip_vertex_input_check = false;
+		framebuffer_layout layout;
+		memset(&layout, 0, sizeof(layout));
 
-		current_vertex_program.rsx_vertex_inputs.resize(0);
-		current_vertex_program.data.resize((512 - transform_program_start) * 4);
+		layout.ignore_change = true;
+		layout.width = rsx::method_registers.surface_clip_width();
+		layout.height = rsx::method_registers.surface_clip_height();
 
-		u32* ucode_src = rsx::method_registers.transform_program.data() + (transform_program_start * 4);
-		u32* ucode_dst = current_vertex_program.data.data();
-		u32  ucode_size = 0;
-		D3   d3;
+		framebuffer_status_valid = false;
+		m_framebuffer_state_contested = false;
+		m_current_framebuffer_context = context;
 
-		for (int i = transform_program_start; i < 512; ++i)
+		if (layout.width == 0 || layout.height == 0)
 		{
-			ucode_size += 4;
-			memcpy(ucode_dst, ucode_src, 4 * sizeof(u32));
-
-			d3.HEX = ucode_src[3];
-			if (d3.end)
-				break;
-
-			ucode_src += 4;
-			ucode_dst += 4;
+			LOG_TRACE(RSX, "Invalid framebuffer setup, w=%d, h=%d", layout.width, layout.height);
+			return layout;
 		}
 
-		current_vertex_program.data.resize(ucode_size);
+		const u16 clip_x = rsx::method_registers.surface_clip_origin_x();
+		const u16 clip_y = rsx::method_registers.surface_clip_origin_y();
 
-		const u32 input_mask = rsx::method_registers.vertex_attrib_input_mask();
-		const u32 modulo_mask = rsx::method_registers.frequency_divider_operation_mask();
-
-		for (u8 index = 0; index < rsx::limits::vertex_count; ++index)
+		layout.color_addresses = get_color_surface_addresses();
+		layout.zeta_address = get_zeta_surface_address();
+		layout.zeta_pitch = rsx::method_registers.surface_z_pitch();
+		layout.color_pitch =
 		{
-			bool enabled = !!(input_mask & (1 << index));
-			if (!enabled)
-				continue;
+			rsx::method_registers.surface_a_pitch(),
+			rsx::method_registers.surface_b_pitch(),
+			rsx::method_registers.surface_c_pitch(),
+			rsx::method_registers.surface_d_pitch(),
+		};
 
-			if (rsx::method_registers.vertex_arrays_info[index].size() > 0)
+		layout.color_format = rsx::method_registers.surface_color();
+		layout.depth_format = rsx::method_registers.surface_depth_fmt();
+		layout.target = rsx::method_registers.surface_color_target();
+
+		const auto aa_mode = rsx::method_registers.surface_antialias();
+		const u32 aa_factor_u = (aa_mode == rsx::surface_antialiasing::center_1_sample) ? 1 : 2;
+		const u32 aa_factor_v = (aa_mode == rsx::surface_antialiasing::center_1_sample || aa_mode == rsx::surface_antialiasing::diagonal_centered_2_samples) ? 1 : 2;
+
+		const auto depth_texel_size = (layout.depth_format == rsx::surface_depth_format::z16 ? 2 : 4) * aa_factor_u;
+		const auto color_texel_size = get_format_block_size_in_bytes(layout.color_format) * aa_factor_u;
+		const bool color_write_enabled = rsx::method_registers.color_write_enabled();
+		const bool depth_write_enabled = rsx::method_registers.depth_write_enabled();
+		const bool stencil_test_enabled = layout.depth_format == rsx::surface_depth_format::z24s8 && rsx::method_registers.stencil_test_enabled();
+		const bool depth_test_enabled = rsx::method_registers.depth_test_enabled();
+
+		bool depth_buffer_unused = false, color_buffer_unused = false;
+
+		switch (context)
+		{
+		case rsx::framebuffer_creation_context::context_clear_all:
+			break;
+		case rsx::framebuffer_creation_context::context_clear_depth:
+			color_buffer_unused = true;
+			break;
+		case rsx::framebuffer_creation_context::context_clear_color:
+			depth_buffer_unused = true;
+			break;
+		case rsx::framebuffer_creation_context::context_draw:
+			// NOTE: As with all other hw, depth/stencil writes involve the corresponding depth/stencil test, i.e No test = No write
+			color_buffer_unused = !color_write_enabled || layout.target == rsx::surface_target::none;
+			depth_buffer_unused = !depth_test_enabled && !stencil_test_enabled;
+			m_framebuffer_state_contested = color_buffer_unused || depth_buffer_unused;
+			break;
+		default:
+			fmt::throw_exception("Unknown framebuffer context 0x%x" HERE, (u32)context);
+		}
+
+		auto check_swizzled_render = [&]()
+		{
+			// Packed rasterization with optimal memory layout
+			// Pitch has to be packed for all active render targets, i.e 64
+			// Formats also seemingly need matching depth and color pitch if both are active
+
+			if (color_buffer_unused)
 			{
-				current_vertex_program.rsx_vertex_inputs.push_back(
-					{index,
-						rsx::method_registers.vertex_arrays_info[index].size(),
-						rsx::method_registers.vertex_arrays_info[index].frequency(),
-						!!((modulo_mask >> index) & 0x1),
-						true,
-						is_int_type(rsx::method_registers.vertex_arrays_info[index].type()), 0});
+				// Check only depth
+				return (layout.zeta_pitch == 64);
 			}
-			else if (vertex_push_buffers[index].vertex_count > 1)
+			else if (depth_buffer_unused)
 			{
-				current_vertex_program.rsx_vertex_inputs.push_back(
-				{ index,
-					rsx::method_registers.register_vertex_info[index].size,
-					1,
-					false,
-					true,
-					is_int_type(rsx::method_registers.vertex_arrays_info[index].type()), 0 });
+				// Check only color
+				for (const auto& index : rsx::utility::get_rtt_indexes(layout.target))
+				{
+					if (layout.color_pitch[index] != 64)
+					{
+						return false;
+					}
+				}
+
+				return true;
 			}
-			else if (rsx::method_registers.register_vertex_info[index].size > 0)
+
+			if (depth_texel_size != color_texel_size)
 			{
-				current_vertex_program.rsx_vertex_inputs.push_back(
-					{index,
-						rsx::method_registers.register_vertex_info[index].size,
-						rsx::method_registers.register_vertex_info[index].frequency,
-						!!((modulo_mask >> index) & 0x1),
-						false,
-						is_int_type(rsx::method_registers.vertex_arrays_info[index].type()), 0});
+				// Both depth and color exist, but pixel size differs
+				return false;
+			}
+			else
+			{
+				// Qualifies, but only if all the pitch values are disabled (64)
+				// Both depth and color are assumed to exist in this case, unless proven otherwise
+				if (layout.zeta_pitch != 64)
+				{
+					return false;
+				}
+
+				for (const auto& index : rsx::utility::get_rtt_indexes(layout.target))
+				{
+					if (layout.color_pitch[index] != 64)
+					{
+						return false;
+					}
+				}
+
+				return true;
+			}
+		};
+
+		// Swizzled render does tight packing of bytes
+		const bool packed_render = check_swizzled_render();
+		u32 minimum_color_pitch = 64u;
+		u32 minimum_zeta_pitch = 64u;
+
+		if (!packed_render)
+		{
+			// Well, this is a write operation either way (clearing or drawing)
+			// We can deduce a minimum pitch for which this operation is guaranteed to require by checking for the lesser of scissor or clip
+			const u32 write_limit_x = std::min<u32>(layout.width, rsx::method_registers.scissor_origin_x() + rsx::method_registers.scissor_width());
+
+			minimum_color_pitch = color_texel_size * write_limit_x;
+			minimum_zeta_pitch = depth_texel_size * write_limit_x;
+		}
+
+		if (depth_buffer_unused)
+		{
+			layout.zeta_address = 0;
+		}
+		else if (layout.zeta_pitch < minimum_zeta_pitch)
+		{
+			layout.zeta_address = 0;
+		}
+		else
+		{
+			// Still exists? Unlikely to get discarded
+			layout.actual_zeta_pitch = packed_render? (layout.width * depth_texel_size) : layout.zeta_pitch;
+		}
+
+		for (const auto &index : rsx::utility::get_rtt_indexes(layout.target))
+		{
+			if (color_buffer_unused)
+			{
+				layout.color_addresses[index] = 0;
+				continue;
+			}
+
+			if (layout.color_pitch[index] < minimum_color_pitch)
+			{
+				// Unlike the depth buffer, when given a color target we know it is intended to be rendered to
+				LOG_ERROR(RSX, "Framebuffer setup error: Color target failed pitch check, Pitch=[%d, %d, %d, %d] + %d, target=%d, context=%d",
+					layout.color_pitch[0], layout.color_pitch[1], layout.color_pitch[2], layout.color_pitch[3],
+					layout.zeta_pitch, (u32)layout.target, (u32)context);
+
+				// Do not remove this buffer for now as it implies something went horribly wrong anyway
+				break;
+			}
+
+			if (layout.color_addresses[index] == layout.zeta_address)
+			{
+				LOG_WARNING(RSX, "Framebuffer at 0x%X has aliasing color/depth targets, color_index=%d, zeta_pitch = %d, color_pitch=%d, context=%d",
+					layout.zeta_address, index, layout.zeta_pitch, layout.color_pitch[index], (u32)context);
+
+				m_framebuffer_state_contested = true;
+
+				// TODO: Research clearing both depth AND color
+				// TODO: If context is creation_draw, deal with possibility of a lost buffer clear
+				if (depth_test_enabled || stencil_test_enabled || (!color_write_enabled && depth_write_enabled))
+				{
+					// Use address for depth data
+					layout.color_addresses[index] = 0;
+					continue;
+				}
+				else
+				{
+					// Use address for color data
+					layout.zeta_address = 0;
+				}
+			}
+
+			verify(HERE), layout.color_addresses[index];
+
+			layout.actual_color_pitch[index] = packed_render? (layout.width * color_texel_size) : layout.color_pitch[index];
+			framebuffer_status_valid = true;
+		}
+
+		if (!framebuffer_status_valid && !layout.zeta_address)
+		{
+			LOG_WARNING(RSX, "Framebuffer setup failed. Draw calls may have been lost");
+			return layout;
+		}
+
+		// At least one attachment exists
+		framebuffer_status_valid = true;
+
+		// Window (raster) offsets
+		const auto window_offset_x = rsx::method_registers.window_offset_x();
+		const auto window_offset_y = rsx::method_registers.window_offset_y();
+		const auto window_clip_width = rsx::method_registers.window_clip_horizontal();
+		const auto window_clip_height = rsx::method_registers.window_clip_vertical();
+
+		if (window_offset_x || window_offset_y)
+		{
+			// Window offset is what affects the raster position!
+			// Tested with Turbo: Super stunt squad that only changes the window offset to declare new framebuffers
+			// Sampling behavior clearly indicates the addresses are expected to have changed
+			if (auto clip_type = rsx::method_registers.window_clip_type())
+				LOG_ERROR(RSX, "Unknown window clip type 0x%X" HERE, clip_type);
+
+			for (const auto &index : rsx::utility::get_rtt_indexes(layout.target))
+			{
+				if (layout.color_addresses[index])
+				{
+					const u32 window_offset_bytes = (layout.actual_color_pitch[index] * window_offset_y) + (color_texel_size * window_offset_x);
+					layout.color_addresses[index] += window_offset_bytes;
+				}
+			}
+
+			if (layout.zeta_address)
+			{
+				layout.zeta_address += (layout.actual_zeta_pitch * window_offset_y) + (depth_texel_size * window_offset_x);
+			}
+		}
+
+		if ((window_clip_width && window_clip_width < layout.width) ||
+			(window_clip_height && window_clip_height < layout.height))
+		{
+			LOG_ERROR(RSX, "Unexpected window clip dimensions: window_clip=%dx%d, surface_clip=%dx%d",
+				window_clip_width, window_clip_height, layout.width, layout.height);
+		}
+
+		layout.aa_mode = aa_mode;
+		layout.aa_factors[0] = aa_factor_u;
+		layout.aa_factors[1] = aa_factor_v;
+
+		bool really_changed = false;
+
+		for (u8 i = 0; i < rsx::limits::color_buffers_count; ++i)
+		{
+			if (m_surface_info[i].address != layout.color_addresses[i])
+			{
+				really_changed = true;
+				break;
+			}
+
+			if (layout.color_addresses[i])
+			{
+				if (m_surface_info[i].width != layout.width ||
+					m_surface_info[i].height != layout.height)
+				{
+					really_changed = true;
+					break;
+				}
+			}
+		}
+
+		if (!really_changed)
+		{
+			if (layout.zeta_address == m_depth_surface_info.address)
+			{
+				// Same target is reused
+				return layout;
+			}
+		}
+
+		layout.ignore_change = false;
+		return layout;
+	}
+
+	void thread::get_current_vertex_program(const std::array<std::unique_ptr<rsx::sampled_image_descriptor_base>, rsx::limits::vertex_textures_count>& sampler_descriptors, bool skip_textures, bool skip_vertex_inputs)
+	{
+		if (!(m_graphics_state & rsx::pipeline_state::vertex_program_dirty))
+			return;
+
+		m_graphics_state &= ~(rsx::pipeline_state::vertex_program_dirty);
+		const u32 transform_program_start = rsx::method_registers.transform_program_start();
+		current_vertex_program.output_mask = rsx::method_registers.vertex_attrib_output_mask();
+		current_vertex_program.skip_vertex_input_check = skip_vertex_inputs;
+
+		current_vertex_program.rsx_vertex_inputs.resize(0);
+		current_vertex_program.data.reserve(512 * 4);
+		current_vertex_program.jump_table.clear();
+		current_vertex_program.texture_dimensions = 0;
+
+		current_vp_metadata = program_hash_util::vertex_program_utils::analyse_vertex_program
+		(
+			method_registers.transform_program.data(),  // Input raw block
+			transform_program_start,                    // Address of entry point
+			current_vertex_program                      // [out] Program object
+		);
+
+		if (!skip_textures && current_vp_metadata.referenced_textures_mask != 0)
+		{
+			for (u32 i = 0; i < rsx::limits::vertex_textures_count; ++i)
+			{
+				const auto &tex = rsx::method_registers.vertex_textures[i];
+				if (tex.enabled() && (current_vp_metadata.referenced_textures_mask & (1 << i)))
+				{
+					current_vertex_program.texture_dimensions |= ((u32)sampler_descriptors[i]->image_type << (i << 1));
+				}
+			}
+		}
+
+		if (!skip_vertex_inputs)
+		{
+			const u32 input_mask = rsx::method_registers.vertex_attrib_input_mask();
+			const u32 modulo_mask = rsx::method_registers.frequency_divider_operation_mask();
+
+			for (u8 index = 0; index < rsx::limits::vertex_count; ++index)
+			{
+				bool enabled = !!(input_mask & (1 << index));
+				if (!enabled)
+					continue;
+
+				if (rsx::method_registers.vertex_arrays_info[index].size() > 0)
+				{
+					current_vertex_program.rsx_vertex_inputs.push_back(
+						{ index,
+							rsx::method_registers.vertex_arrays_info[index].size(),
+							rsx::method_registers.vertex_arrays_info[index].frequency(),
+							!!((modulo_mask >> index) & 0x1),
+							true,
+							is_int_type(rsx::method_registers.vertex_arrays_info[index].type()), 0 });
+				}
+				else if (vertex_push_buffers[index].vertex_count > 1)
+				{
+					current_vertex_program.rsx_vertex_inputs.push_back(
+						{ index,
+							vertex_push_buffers[index].size,
+							1,
+							false,
+							true,
+							is_int_type(vertex_push_buffers[index].type), 0 });
+				}
+				else if (rsx::method_registers.register_vertex_info[index].size > 0)
+				{
+					current_vertex_program.rsx_vertex_inputs.push_back(
+						{ index,
+							rsx::method_registers.register_vertex_info[index].size,
+							rsx::method_registers.register_vertex_info[index].frequency,
+							!!((modulo_mask >> index) & 0x1),
+							false,
+							is_int_type(rsx::method_registers.vertex_arrays_info[index].type()), 0 });
+				}
 			}
 		}
 	}
 
-	vertex_input_layout thread::analyse_inputs_interleaved() const
+	void thread::analyse_inputs_interleaved(vertex_input_layout& result) const
 	{
 		const rsx_state& state = rsx::method_registers;
 		const u32 input_mask = state.vertex_attrib_input_mask();
 
+		result.clear();
+
 		if (state.current_draw_clause.command == rsx::draw_command::inlined_array)
 		{
-			vertex_input_layout result = {};
-			result.interleaved_blocks.reserve(8);
-
 			interleaved_range_info info = {};
 			info.interleaved = true;
 			info.locations.reserve(8);
 
 			for (u8 index = 0; index < rsx::limits::vertex_count; ++index)
 			{
-				const u32 mask = (1u << index);
 				auto &vinfo = state.vertex_arrays_info[index];
 
 				if (vinfo.size() > 0)
 				{
-					info.locations.push_back(index);
+					// Stride must be updated even if the stream is disabled
 					info.attribute_stride += rsx::get_vertex_type_size_on_host(vinfo.type(), vinfo.size());
+					info.locations.push_back({ index, false, 1 });
+
+					if (input_mask & (1u << index))
+					{
+						result.attribute_placement[index] = attribute_buffer_placement::transient;
+					}
+				}
+				else if (state.register_vertex_info[index].size > 0 && input_mask & (1u << index))
+				{
+					//Reads from register
+					result.referenced_registers.push_back(index);
 					result.attribute_placement[index] = attribute_buffer_placement::transient;
 				}
 			}
 
-			result.interleaved_blocks.push_back(info);
-			return result;
+			result.interleaved_blocks.emplace_back(std::move(info));
+			return;
 		}
 
 		const u32 frequency_divider_mask = rsx::method_registers.frequency_divider_operation_mask();
-		vertex_input_layout result = {};
-		result.interleaved_blocks.reserve(8);
-		result.referenced_registers.reserve(4);
+		result.interleaved_blocks.reserve(16);
+		result.referenced_registers.reserve(16);
 
 		for (u8 index = 0; index < rsx::limits::vertex_count; ++index)
 		{
-			const bool enabled = !!(input_mask & (1 << index));
-			if (!enabled)
+			// Check if vertex stream is enabled
+			if (!(input_mask & (1 << index)))
 				continue;
-
-			if (vertex_push_buffers[index].size > 0)
-			{
-				std::pair<u8, u32> volatile_range_info = std::make_pair(index, static_cast<u32>(vertex_push_buffers[index].data.size() * sizeof(u32)));
-				result.volatile_blocks.push_back(volatile_range_info);
-				result.attribute_placement[index] = attribute_buffer_placement::transient;
-				continue;
-			}
 
 			//Check for interleaving
-			auto &info = state.vertex_arrays_info[index];
-			if (info.size() == 0 && state.register_vertex_info[index].size > 0)
+			const auto &info = state.vertex_arrays_info[index];
+			if (rsx::method_registers.current_draw_clause.is_immediate_draw &&
+				rsx::method_registers.current_draw_clause.command != rsx::draw_command::indexed)
 			{
-				//Reads from register
-				result.referenced_registers.push_back(index);
-				result.attribute_placement[index] = attribute_buffer_placement::transient;
+				// NOTE: In immediate rendering mode, all vertex setup is ignored
+				// Observed with GT5, immediate render bypasses array pointers completely, even falling back to fixed-function register defaults
+				if (vertex_push_buffers[index].vertex_count > 1)
+				{
+					// Read temp buffer (register array)
+					std::pair<u8, u32> volatile_range_info = std::make_pair(index, static_cast<u32>(vertex_push_buffers[index].data.size() * sizeof(u32)));
+					result.volatile_blocks.push_back(volatile_range_info);
+					result.attribute_placement[index] = attribute_buffer_placement::transient;
+				}
+				else if (state.register_vertex_info[index].size > 0)
+				{
+					// Reads from register
+					result.referenced_registers.push_back(index);
+					result.attribute_placement[index] = attribute_buffer_placement::transient;
+				}
+
+				// Fall back to the default register value if no source is specified via register
 				continue;
 			}
 
-			if (info.size() > 0)
+			if (!info.size())
+			{
+				if (state.register_vertex_info[index].size > 0)
+				{
+					//Reads from register
+					result.referenced_registers.push_back(index);
+					result.attribute_placement[index] = attribute_buffer_placement::transient;
+					continue;
+				}
+			}
+			else
 			{
 				result.attribute_placement[index] = attribute_buffer_placement::persistent;
 				const u32 base_address = info.offset() & 0x7fffffff;
 				bool alloc_new_block = true;
+				bool modulo = !!(frequency_divider_mask & (1 << index));
 
 				for (auto &block : result.interleaved_blocks)
 				{
@@ -1443,13 +1471,8 @@ namespace rsx
 					}
 
 					alloc_new_block = false;
-					block.locations.push_back(index);
+					block.locations.push_back({ index, modulo, info.frequency() });
 					block.interleaved = true;
-					block.min_divisor = std::min(block.min_divisor, info.frequency());
-
-					if (block.all_modulus)
-						block.all_modulus = !!(frequency_divider_mask & (1 << index));
-
 					break;
 				}
 
@@ -1459,10 +1482,8 @@ namespace rsx
 					block.base_offset = base_address;
 					block.attribute_stride = info.stride();
 					block.memory_location = info.offset() >> 31;
-					block.locations.reserve(4);
-					block.locations.push_back(index);
-					block.min_divisor = info.frequency();
-					block.all_modulus = !!(frequency_divider_mask & (1 << index));
+					block.locations.reserve(16);
+					block.locations.push_back({ index, modulo, info.frequency() });
 
 					if (block.attribute_stride == 0)
 					{
@@ -1470,7 +1491,7 @@ namespace rsx
 						block.attribute_stride = rsx::get_vertex_type_size_on_host(info.type(), info.size());
 					}
 
-					result.interleaved_blocks.push_back(block);
+					result.interleaved_blocks.emplace_back(std::move(block));
 				}
 			}
 		}
@@ -1480,26 +1501,27 @@ namespace rsx
 			//Calculate real data address to be used during upload
 			info.real_offset_address = rsx::get_address(rsx::get_vertex_offset_from_base(state.vertex_data_base_offset(), info.base_offset), info.memory_location);
 		}
-
-		return result;
 	}
 
 	void thread::get_current_fragment_program(const std::array<std::unique_ptr<rsx::sampled_image_descriptor_base>, rsx::limits::fragment_textures_count>& sampler_descriptors)
 	{
+		if (!(m_graphics_state & rsx::pipeline_state::fragment_program_dirty))
+			return;
+
+		m_graphics_state &= ~(rsx::pipeline_state::fragment_program_dirty);
 		auto &result = current_fragment_program = {};
 
 		const u32 shader_program = rsx::method_registers.shader_program_address();
-		if (shader_program == 0)
-			return;
 
 		const u32 program_location = (shader_program & 0x3) - 1;
 		const u32 program_offset = (shader_program & ~0x3);
 
 		result.addr = vm::base(rsx::get_address(program_offset, program_location));
-		auto program_start = program_hash_util::fragment_program_utils::get_fragment_program_start(result.addr);
+		current_fp_metadata = program_hash_util::fragment_program_utils::analyse_fragment_program(result.addr);
 
-		result.addr = ((u8*)result.addr + program_start);
-		result.offset = program_offset + program_start;
+		result.addr = ((u8*)result.addr + current_fp_metadata.program_start_offset);
+		result.offset = program_offset + current_fp_metadata.program_start_offset;
+		result.ucode_length = current_fp_metadata.program_ucode_length;
 		result.valid = true;
 		result.ctrl = rsx::method_registers.shader_control() & (CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS | CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT);
 		result.unnormalized_coords = 0;
@@ -1511,7 +1533,6 @@ namespace rsx
 		result.redirected_textures = 0;
 		result.shadow_textures = 0;
 
-		std::array<texture_dimension_extended, 16> texture_dimensions;
 		const auto resolution_scale = rsx::get_resolution_scale();
 
 		for (u32 i = 0; i < rsx::limits::fragment_textures_count; ++i)
@@ -1521,41 +1542,37 @@ namespace rsx
 			result.texture_scale[i][1] = sampler_descriptors[i]->scale_y;
 			result.texture_scale[i][2] = (f32)tex.remap();  //Debug value
 
-			if (!tex.enabled())
-			{
-				texture_dimensions[i] = texture_dimension_extended::texture_dimension_2d;
-			}
-			else
+			if (tex.enabled() && (current_fp_metadata.referenced_textures_mask & (1 << i)))
 			{
 				u32 texture_control = 0;
-				texture_dimensions[i] = sampler_descriptors[i]->image_type;
+				result.texture_dimensions |= ((u32)sampler_descriptors[i]->image_type << (i << 1));
 
 				if (tex.alpha_kill_enabled())
 				{
 					//alphakill can be ignored unless a valid comparison function is set
-					const rsx::comparison_function func = (rsx::comparison_function)tex.zfunc();
-					if (func < rsx::comparison_function::always && func >= rsx::comparison_function::never)
-					{
-						texture_control |= (1 << 4);			//alphakill enable
-						texture_control |= ((u32)func << 5);	//alphakill function
-					}
+					texture_control |= (1 << 4);
 				}
 
 				const u32 texaddr = rsx::get_address(tex.offset(), tex.location());
 				const u32 raw_format = tex.format();
+				const u32 format = raw_format & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
 
 				if (raw_format & CELL_GCM_TEXTURE_UN)
 					result.unnormalized_coords |= (1 << i);
 
 				if (sampler_descriptors[i]->is_depth_texture)
 				{
-					const u32 format = raw_format & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
 					switch (format)
 					{
+					case CELL_GCM_TEXTURE_X16:
+					{
+						// NOP, a simple way to quickly read DEPTH16 data without shadow comparison
+						break;
+					}
 					case CELL_GCM_TEXTURE_A8R8G8B8:
 					case CELL_GCM_TEXTURE_D8R8G8B8:
-					case CELL_GCM_TEXTURE_A4R4G4B4:
-					case CELL_GCM_TEXTURE_R5G6B5:
+					case CELL_GCM_TEXTURE_A4R4G4B4: //TODO
+					case CELL_GCM_TEXTURE_R5G6B5:   //TODO
 					{
 						u32 remap = tex.remap();
 						result.redirected_textures |= (1 << i);
@@ -1563,8 +1580,9 @@ namespace rsx
 						break;
 					}
 					case CELL_GCM_TEXTURE_DEPTH16:
-					case CELL_GCM_TEXTURE_DEPTH24_D8:
 					case CELL_GCM_TEXTURE_DEPTH16_FLOAT:
+					case CELL_GCM_TEXTURE_DEPTH24_D8:
+					case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT:
 					{
 						const auto compare_mode = (rsx::comparison_function)tex.zfunc();
 						if (result.textures_alpha_kill[i] == 0 &&
@@ -1578,12 +1596,37 @@ namespace rsx
 					}
 				}
 
-				texture_control |= tex.gamma();
-				result.texture_scale[i][3] = (f32)texture_control;
+				if (const auto srgb_mask = tex.gamma())
+				{
+					switch (format)
+					{
+					case CELL_GCM_TEXTURE_DEPTH24_D8:
+					case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT:
+					case CELL_GCM_TEXTURE_DEPTH16:
+					case CELL_GCM_TEXTURE_DEPTH16_FLOAT:
+					case CELL_GCM_TEXTURE_X16:
+					case CELL_GCM_TEXTURE_Y16_X16:
+					case CELL_GCM_TEXTURE_COMPRESSED_HILO8:
+					case CELL_GCM_TEXTURE_COMPRESSED_HILO_S8:
+					case CELL_GCM_TEXTURE_W16_Z16_Y16_X16_FLOAT:
+					case CELL_GCM_TEXTURE_W32_Z32_Y32_X32_FLOAT:
+					case CELL_GCM_TEXTURE_X32_FLOAT:
+					case CELL_GCM_TEXTURE_Y16_X16_FLOAT:
+						//Special data formats (XY, HILO, DEPTH) are not RGB formats
+						//Ignore gamma flags
+						break;
+					default:
+						texture_control |= srgb_mask;
+						break;
+					}
+				}
+
+#ifdef __APPLE__
+				texture_control |= (sampler_descriptors[i]->encoded_component_map() << 16);
+#endif
+				result.texture_scale[i][3] = (f32&)texture_control;
 			}
 		}
-
-		result.set_texture_dimension(texture_dimensions);
 
 		//Sanity checks
 		if (result.ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT)
@@ -1601,17 +1644,15 @@ namespace rsx
 		auto &result = current_fragment_program = {};
 
 		const u32 shader_program = rsx::method_registers.shader_program_address();
-		if (shader_program == 0)
-			return;
-
 		const u32 program_location = (shader_program & 0x3) - 1;
 		const u32 program_offset = (shader_program & ~0x3);
 
 		result.addr = vm::base(rsx::get_address(program_offset, program_location));
-		auto program_start = program_hash_util::fragment_program_utils::get_fragment_program_start(result.addr);
+		auto program_info = program_hash_util::fragment_program_utils::analyse_fragment_program(result.addr);
 
-		result.addr = ((u8*)result.addr + program_start);
-		result.offset = program_offset + program_start;
+		result.addr = ((u8*)result.addr + program_info.program_start_offset);
+		result.offset = program_offset + program_info.program_start_offset;
+		result.ucode_length = program_info.program_ucode_length;
 		result.valid = true;
 		result.ctrl = rsx::method_registers.shader_control() & (CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS | CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT);
 		result.unnormalized_coords = 0;
@@ -1623,7 +1664,6 @@ namespace rsx
 		result.redirected_textures = 0;
 		result.shadow_textures = 0;
 
-		std::array<texture_dimension_extended, 16> texture_dimensions;
 		const auto resolution_scale = rsx::get_resolution_scale();
 
 		for (u32 i = 0; i < rsx::limits::fragment_textures_count; ++i)
@@ -1634,13 +1674,9 @@ namespace rsx
 			result.textures_alpha_kill[i] = 0;
 			result.textures_zfunc[i] = 0;
 
-			if (!tex.enabled())
+			if (tex.enabled() && (program_info.referenced_textures_mask & (1 << i)))
 			{
-				texture_dimensions[i] = texture_dimension_extended::texture_dimension_2d;
-			}
-			else
-			{
-				texture_dimensions[i] = tex.get_extended_texture_dimension();
+				result.texture_dimensions |= ((u32)tex.get_extended_texture_dimension() << (i << 1));
 
 				if (tex.alpha_kill_enabled())
 				{
@@ -1697,8 +1733,9 @@ namespace rsx
 							break;
 						}
 						case CELL_GCM_TEXTURE_DEPTH16:
-						case CELL_GCM_TEXTURE_DEPTH24_D8:
 						case CELL_GCM_TEXTURE_DEPTH16_FLOAT:
+						case CELL_GCM_TEXTURE_DEPTH24_D8:
+						case CELL_GCM_TEXTURE_DEPTH24_D8_FLOAT:
 						{
 							const auto compare_mode = (rsx::comparison_function)tex.zfunc();
 							if (result.textures_alpha_kill[i] == 0 &&
@@ -1714,8 +1751,6 @@ namespace rsx
 				}
 			}
 		}
-
-		result.set_texture_dimension(texture_dimensions);
 	}
 
 	void thread::reset()
@@ -1733,10 +1768,8 @@ namespace rsx
 
 		memset(display_buffers, 0, sizeof(display_buffers));
 
-		m_rsx_thread_exiting = false;
-
 		on_init_rsx();
-		start_thread(fxm::get<GSRender>());
+		m_rsx_thread_exiting = false;
 	}
 
 	GcmTileInfo *thread::find_tile(u32 offset, u32 location)
@@ -1775,25 +1808,25 @@ namespace rsx
 
 	u32 thread::ReadIO32(u32 addr)
 	{
-		u32 value;
-
-		if (!RSXIOMem.Read32(addr, &value))
+		if (u32 ea = RSXIOMem.RealAddr(addr))
 		{
-			fmt::throw_exception("%s(addr=0x%x): RSXIO memory not mapped" HERE, __FUNCTION__, addr);
+			return vm::read32(ea);
 		}
 
-		return value;
+		fmt::throw_exception("%s(addr=0x%x): RSXIO memory not mapped" HERE, __FUNCTION__, addr);
 	}
 
 	void thread::WriteIO32(u32 addr, u32 value)
 	{
-		if (!RSXIOMem.Write32(addr, value))
+		if (u32 ea = RSXIOMem.RealAddr(addr))
 		{
-			fmt::throw_exception("%s(addr=0x%x): RSXIO memory not mapped" HERE, __FUNCTION__, addr);
+			return vm::write32(ea, value);
 		}
+
+		fmt::throw_exception("%s(addr=0x%x): RSXIO memory not mapped" HERE, __FUNCTION__, addr);
 	}
 
-	std::pair<u32, u32> thread::calculate_memory_requirements(const vertex_input_layout& layout, u32 vertex_count)
+	std::pair<u32, u32> thread::calculate_memory_requirements(const vertex_input_layout& layout, u32 first_vertex, u32 vertex_count)
 	{
 		u32 persistent_memory_size = 0;
 		u32 volatile_memory_size = 0;
@@ -1819,37 +1852,13 @@ namespace rsx
 				}
 			}
 
-			for (const auto &block : layout.interleaved_blocks)
-			{
-				u32 unique_verts;
-
-				if (block.single_vertex)
-				{
-					unique_verts = 1;
-				}
-				else if (block.min_divisor > 1)
-				{
-					if (block.all_modulus)
-						unique_verts = block.min_divisor;
-					else
-					{
-						unique_verts = vertex_count / block.min_divisor;
-						if (vertex_count % block.min_divisor) unique_verts++;
-					}
-				}
-				else
-				{
-					unique_verts = vertex_count;
-				}
-
-				persistent_memory_size += block.attribute_stride * unique_verts;
-			}
+			persistent_memory_size = layout.calculate_interleaved_memory_requirements(first_vertex, vertex_count);
 		}
 
 		return std::make_pair(persistent_memory_size, volatile_memory_size);
 	}
 
-	void thread::fill_vertex_layout_state(const vertex_input_layout& layout, u32 vertex_count, s32* buffer, u32 persistent_offset_base, u32 volatile_offset_base)
+	void thread::fill_vertex_layout_state(const vertex_input_layout& layout, u32 first_vertex, u32 vertex_count, s32* buffer, u32 persistent_offset_base, u32 volatile_offset_base)
 	{
 		std::array<s32, 16> offset_in_block = {};
 		u32 volatile_offset = volatile_offset_base;
@@ -1874,12 +1883,12 @@ namespace rsx
 		if (rsx::method_registers.current_draw_clause.command == rsx::draw_command::inlined_array)
 		{
 			const auto &block = layout.interleaved_blocks[0];
-			u32 inline_data_offset = volatile_offset_base;
-			for (const u8 index : block.locations)
+			u32 inline_data_offset = volatile_offset;
+			for (const auto& attrib : block.locations)
 			{
-				auto &info = rsx::method_registers.vertex_arrays_info[index];
+				auto &info = rsx::method_registers.vertex_arrays_info[attrib.index];
 
-				offset_in_block[index] = inline_data_offset;
+				offset_in_block[attrib.index] = inline_data_offset;
 				inline_data_offset += rsx::get_vertex_type_size_on_host(info.type(), info.size());
 			}
 		}
@@ -1887,102 +1896,101 @@ namespace rsx
 		{
 			for (const auto &block : layout.interleaved_blocks)
 			{
-				for (u8 index : block.locations)
+				for (const auto& attrib : block.locations)
 				{
-					const u32 local_address = (rsx::method_registers.vertex_arrays_info[index].offset() & 0x7fffffff);
-					offset_in_block[index] = persistent_offset + (local_address - block.base_offset);
+					const u32 local_address = (rsx::method_registers.vertex_arrays_info[attrib.index].offset() & 0x7fffffff);
+					offset_in_block[attrib.index] = persistent_offset + (local_address - block.base_offset);
 				}
 
-				u32 unique_verts;
-
-				if (block.single_vertex)
-				{
-					unique_verts = 1;
-				}
-				else if (block.min_divisor > 1)
-				{
-					if (block.all_modulus)
-						unique_verts = block.min_divisor;
-					else
-					{
-						unique_verts = vertex_count / block.min_divisor;
-						if (vertex_count % block.min_divisor) unique_verts++;
-					}
-				}
-				else
-				{
-					unique_verts = vertex_count;
-				}
-
-				persistent_offset += block.attribute_stride * unique_verts;
+				const auto range = block.calculate_required_range(first_vertex, vertex_count);
+				persistent_offset += block.attribute_stride * range.second;
 			}
 		}
 
-		//Fill the data
-		memset(buffer, 0, 256);
+		// Fill the data
+		// Each descriptor field is 64 bits wide
+		// [0-8] attribute stride
+		// [8-24] attribute divisor
+		// [24-27] attribute type
+		// [27-30] attribute size
+		// [30-31] reserved
+		// [31-60] starting offset
+		// [60-21] swap bytes flag
+		// [61-22] volatile flag
+		// [62-63] modulo enable flag
 
-		const s32 swap_storage_mask = (1 << 8);
-		const s32 volatile_storage_mask = (1 << 9);
-		const s32 default_frequency_mask = (1 << 10);
-		const s32 repeating_frequency_mask = (3 << 10);
-		const s32 input_function_modulo_mask = (1 << 12);
-		const s32 input_divisor_mask = (0xFFFF << 13);
+		const s32 default_frequency_mask = (1 << 8);
+		const s32 swap_storage_mask = (1 << 29);
+		const s32 volatile_storage_mask = (1 << 30);
+		const s32 modulo_op_frequency_mask = (1 << 31);
 
 		const u32 modulo_mask = rsx::method_registers.frequency_divider_operation_mask();
+		const auto max_index = (first_vertex + vertex_count) - 1;
 
 		for (u8 index = 0; index < rsx::limits::vertex_count; ++index)
 		{
 			if (layout.attribute_placement[index] == attribute_buffer_placement::none)
+			{
+				((u64*)buffer)[index] = 0ull;
 				continue;
+			}
 
 			rsx::vertex_base_type type = {};
 			s32 size = 0;
-			s32 attributes = 0;
-
-			bool is_be_type = true;
+			s32 attrib0 = 0;
+			s32 attrib1 = 0;
 
 			if (layout.attribute_placement[index] == attribute_buffer_placement::transient)
 			{
 				if (rsx::method_registers.current_draw_clause.command == rsx::draw_command::inlined_array)
 				{
-					auto &info = rsx::method_registers.vertex_arrays_info[index];
-					type = info.type();
-					size = info.size();
+					const auto &info = rsx::method_registers.vertex_arrays_info[index];
 
-					attributes = layout.interleaved_blocks[0].attribute_stride;
-					attributes |= default_frequency_mask | volatile_storage_mask;
-
-					is_be_type = false;
-				}
-				else
-				{
-					//Data is either from an immediate render or register input
-					//Immediate data overrides register input
-
-					if (rsx::method_registers.current_draw_clause.is_immediate_draw && vertex_push_buffers[index].size > 0)
+					if (!info.size())
 					{
-						const auto &info = rsx::method_registers.register_vertex_info[index];
-						type = info.type;
-						size = info.size;
+						// Register
+						const auto& reginfo = rsx::method_registers.register_vertex_info[index];
+						type = reginfo.type;
+						size = reginfo.size;
 
-						attributes = rsx::get_vertex_type_size_on_host(type, size);
-						attributes |= default_frequency_mask | volatile_storage_mask;
-
-						is_be_type = true;
+						attrib0 = rsx::get_vertex_type_size_on_host(type, size);
 					}
 					else
 					{
-						//Register
+						// Array
+						type = info.type();
+						size = info.size();
+
+						attrib0 = layout.interleaved_blocks[0].attribute_stride | default_frequency_mask;
+					}
+				}
+				else
+				{
+					// Data is either from an immediate render or register input
+					// Immediate data overrides register input
+
+					if (rsx::method_registers.current_draw_clause.is_immediate_draw &&
+						vertex_push_buffers[index].vertex_count > 1)
+					{
+						// Push buffer
+						const auto &info = vertex_push_buffers[index];
+						type = info.type;
+						size = info.size;
+
+						attrib0 = rsx::get_vertex_type_size_on_host(type, size) | default_frequency_mask;
+					}
+					else
+					{
+						// Register
 						const auto& info = rsx::method_registers.register_vertex_info[index];
 						type = info.type;
 						size = info.size;
 
-						attributes = rsx::get_vertex_type_size_on_host(type, size);
-						attributes |= volatile_storage_mask;
-
-						is_be_type = false;
+						attrib0 = rsx::get_vertex_type_size_on_host(type, size);
 					}
 				}
+
+				attrib1 |= volatile_storage_mask;
 			}
 			else
 			{
@@ -1991,7 +1999,7 @@ namespace rsx
 				size = info.size();
 
 				auto stride = info.stride();
-				attributes |= stride;
+				attrib0 = stride;
 
 				if (stride > 0) //when stride is 0, input is not an array but a single element
 				{
@@ -2000,38 +2008,63 @@ namespace rsx
 					{
 					case 0:
 					case 1:
-						attributes |= default_frequency_mask;
+					{
+						attrib0 |= default_frequency_mask;
 						break;
+					}
 					default:
 					{
 						if (modulo_mask & (1 << index))
-							attributes |= input_function_modulo_mask;
-
-						attributes |= repeating_frequency_mask;
-						attributes |= (frequency << 13) & input_divisor_mask;
+						{
+							if (max_index >= frequency)
+							{
+								// Only set modulo mask if a modulo op is actually necessary!
+								// This requires that the uploaded range for this attr = [0, freq-1]
+								// Ignoring modulo op if the rendered range does not wrap allows for range optimization
+								attrib0 |= (frequency << 8);
+								attrib1 |= modulo_op_frequency_mask;
+							}
+							else
+							{
+								attrib0 |= default_frequency_mask;
+							}
+						}
+						else
+						{
+							// Division
+							attrib0 |= (frequency << 8);
+						}
+						break;
 					}
 					}
 				}
 			} //end attribute placement check
 
+			// If data is passed via registers, it is already received in little endian
+			const bool is_be_type = (layout.attribute_placement[index] != attribute_buffer_placement::transient);
+			bool to_swap_bytes = is_be_type;
+
 			switch (type)
 			{
 			case rsx::vertex_base_type::cmp:
+				// Compressed 4 components into one 4-byte value
 				size = 1;
-				//fall through
-			default:
-				if (is_be_type) attributes |= swap_storage_mask;
 				break;
 			case rsx::vertex_base_type::ub:
 			case rsx::vertex_base_type::ub256:
-				if (!is_be_type) attributes |= swap_storage_mask;
+				// These are single byte formats, but inverted order (BGRA vs ARGB) when passed via registers
+				to_swap_bytes = (layout.attribute_placement[index] == attribute_buffer_placement::transient);
 				break;
 			}
 
-			buffer[index * 4 + 0] = static_cast<s32>(type);
-			buffer[index * 4 + 1] = size;
-			buffer[index * 4 + 2] = offset_in_block[index];
-			buffer[index * 4 + 3] = attributes;
+			if (to_swap_bytes) attrib1 |= swap_storage_mask;
+
+			attrib0 |= (static_cast<s32>(type) << 24);
+			attrib0 |= (size << 27);
+			attrib1 |= offset_in_block[index];
+
+			buffer[index * 2 + 0] = attrib0;
+			buffer[index * 2 + 1] = attrib1;
 		}
 	}
 
@@ -2046,12 +2079,18 @@ namespace rsx
 		{
 			if (draw_call.command == rsx::draw_command::inlined_array)
 			{
+				for (const u8 index : layout.referenced_registers)
+				{
+					memcpy(transient, rsx::method_registers.register_vertex_info[index].data.data(), 16);
+					transient += 16;
+				}
+
 				memcpy(transient, draw_call.inline_vertex_array.data(), draw_call.inline_vertex_array.size() * sizeof(u32));
 				//Is it possible to reference data outside of the inlined array?
 				return;
 			}
 
-			//NOTE: Order is important! Transient ayout is always push_buffers followed by register data
+			//NOTE: Order is important! Transient layout is always push_buffers followed by register data
 			if (draw_call.is_immediate_draw)
 			{
 				//NOTE: It is possible for immediate draw to only contain index data, so vertex data can be in persistent memory
@@ -2073,30 +2112,11 @@ namespace rsx
 		{
 			for (const auto &block : layout.interleaved_blocks)
 			{
-				u32 unique_verts;
-				u32 vertex_base = 0;
+				auto range = block.calculate_required_range(first_vertex, vertex_count);
 
-				if (block.single_vertex)
-				{
-					unique_verts = 1;
-				}
-				else if (block.min_divisor > 1)
-				{
-					if (block.all_modulus)
-						unique_verts = block.min_divisor;
-					else
-					{
-						unique_verts = vertex_count / block.min_divisor;
-						if (vertex_count % block.min_divisor) unique_verts++;
-					}
-				}
-				else
-				{
-					unique_verts = vertex_count;
-					vertex_base = first_vertex * block.attribute_stride;
-				}
+				const u32 data_size = range.second * block.attribute_stride;
+				const u32 vertex_base = range.first * block.attribute_stride;
 
-				const u32 data_size = block.attribute_stride * unique_verts;
 				memcpy(persistent, (char*)vm::base(block.real_offset_address) + vertex_base, data_size);
 				persistent += data_size;
 			}
@@ -2105,24 +2125,52 @@ namespace rsx
 
 	void thread::flip(int buffer)
 	{
-		if (g_cfg.video.frame_skip_enabled)
+		if (!(async_flip_requested & flip_request::any))
 		{
-			m_skip_frame_ctr++;
+			// Flip is processed through inline FLIP command in the commandstream
+			// This is critical as it is a reliable end-of-frame marker
 
-			if (m_skip_frame_ctr == g_cfg.video.consequtive_frames_to_draw)
-				m_skip_frame_ctr = -g_cfg.video.consequtive_frames_to_skip;
+			if (!g_cfg.video.disable_FIFO_reordering)
+			{
+				// Try to enable FIFO optimizations
+				// Only rarely useful for some games like RE4
+				m_flattener.evaluate_performance(m_draw_calls);
+			}
 
-			skip_frame = (m_skip_frame_ctr < 0);
+			// Reset zcull ctrl
+			zcull_ctrl->set_active(this, false);
+			zcull_ctrl->clear(this);
+
+			if (zcull_ctrl->has_pending())
+			{
+				LOG_TRACE(RSX, "Dangling reports found, discarding...");
+				zcull_ctrl->sync(this);
+			}
+
+			if (g_cfg.video.frame_skip_enabled)
+			{
+				m_skip_frame_ctr++;
+
+				if (m_skip_frame_ctr == g_cfg.video.consequtive_frames_to_draw)
+					m_skip_frame_ctr = -g_cfg.video.consequtive_frames_to_skip;
+
+				skip_frame = (m_skip_frame_ctr < 0);
+			}
+		}
+		else
+		{
+			if (async_flip_requested & flip_request::emu_requested)
+			{
+				m_flattener.force_disable();
+			}
+
+			async_flip_requested.clear();
 		}
 
-		//Reset zcull ctrl
-		zcull_ctrl->set_active(this, false);
-		zcull_ctrl->clear(this);
-
-		if (zcull_ctrl->has_pending())
+		if (!skip_frame)
 		{
-			LOG_ERROR(RSX, "Dangling reports found, discarding...");
-			zcull_ctrl->sync(this);
+			// Reset counter
+			m_draw_calls = 0;
 		}
 
 		performance_counters.sampled_frames++;
@@ -2202,6 +2250,9 @@ namespace rsx
 	{
 		zcull_ctrl->sync(this);
 
+		// Fragment constants may have been updated
+		m_graphics_state |= rsx::pipeline_state::fragment_constants_dirty;
+
 		//TODO: On sync every sub-unit should finish any pending tasks
 		//Might cause zcull lockup due to zombie 'unclaimed reports' which are not forcefully removed currently
 		//verify (HERE), async_tasks_pending.load() == 0;
@@ -2215,6 +2266,87 @@ namespace rsx
 	void thread::notify_zcull_info_changed()
 	{
 		check_zcull_status(false);
+	}
+
+	void thread::on_notify_memory_mapped(u32 address, u32 size)
+	{
+		// In the case where an unmap is followed shortly after by a remap of the same address space
+		// we must block until RSX has invalidated the memory
+		// or lock m_mtx_task and do it ourselves
+
+		if (m_rsx_thread_exiting)
+			return;
+
+		reader_lock lock(m_mtx_task);
+
+		const auto map_range = address_range::start_length(address, size);
+
+		if (!m_invalidated_memory_range.valid())
+			return;
+
+		if (m_invalidated_memory_range.overlaps(map_range))
+		{
+			lock.upgrade();
+			handle_invalidated_memory_range();
+		}
+	}
+
+	void thread::on_notify_memory_unmapped(u32 address, u32 size)
+	{
+		if (!m_rsx_thread_exiting && address < 0xC0000000)
+		{
+			u32 ea = address >> 20, io = RSXIOMem.io[ea];
+
+			if (io < 512)
+			{
+				if (!isHLE)
+				{
+					const u64 unmap_key = u64((1ull << (size >> 20)) - 1) << (io & 0x3f);
+					const u64 gcm_flag = 0x100000000ull << (io >> 6);
+					sys_event_port_send(fxm::get<SysRsxConfig>()->rsx_event_port, 0, gcm_flag, unmap_key);
+				}
+				else
+				{
+					for (const u32 end = ea + (size >> 20); ea < end;)
+					{
+						offsetTable.ioAddress[ea++] = 0xFFFF;
+						offsetTable.eaAddress[io++] = 0xFFFF;
+					}
+				}
+			}
+
+			// Queue up memory invalidation
+			std::lock_guard lock(m_mtx_task);
+			const bool existing_range_valid = m_invalidated_memory_range.valid();
+			const auto unmap_range = address_range::start_length(address, size);
+
+			if (existing_range_valid && m_invalidated_memory_range.touches(unmap_range))
+			{
+				// Merge range-to-invalidate in case of consecutive unmaps
+				m_invalidated_memory_range.set_min_max(unmap_range);
+			}
+			else
+			{
+				if (existing_range_valid)
+				{
+					// We can only delay consecutive unmaps.
+					// Otherwise, to avoid VirtualProtect failures, we need to do the invalidation here
+					handle_invalidated_memory_range();
+				}
+
+				m_invalidated_memory_range = unmap_range;
+			}
+		}
+	}
+
+	// NOTE: m_mtx_task lock must be acquired before calling this method
+	void thread::handle_invalidated_memory_range()
+	{
+		if (!m_invalidated_memory_range.valid())
+			return;
+
+		on_invalidate_memory_range(m_invalidated_memory_range);
+		m_invalidated_memory_range.invalidate();
 	}
 
 	//Pause/cont wrappers for FIFO ctrl. Never call this from rsx thread itself!
@@ -2233,6 +2365,7 @@ namespace rsx
 
 	void thread::unpause()
 	{
+		// TODO: Clean this shit up
 		external_interrupt_lock.store(false);
 	}
 
@@ -2258,68 +2391,126 @@ namespace rsx
 		return performance_counters.approximate_load;
 	}
 
-	//TODO: Move these helpers into a better class dedicated to shell interface handling (use idm?)
-	//They are not dependent on rsx at all
-	rsx::overlays::save_dialog* thread::shell_open_save_dialog()
+	void thread::request_emu_flip(u32 buffer)
 	{
-		if (supports_native_ui)
+		const bool is_rsxthr = std::this_thread::get_id() == m_rsx_thread;
+
+		// requested through command buffer
+		if (is_rsxthr)
 		{
-			auto ptr = new rsx::overlays::save_dialog();
-			m_custom_ui.reset(ptr);
-			return ptr;
+			// NOTE: The flip will clear any queued flip requests
+			handle_emu_flip(buffer);
 		}
-		else
+		else // requested 'manually' through ppu syscall
 		{
-			return nullptr;
+			if (async_flip_requested & flip_request::emu_requested)
+			{
+				// ignore multiple requests until previous happens
+				return;
+			}
+
+			async_flip_buffer = buffer;
+			async_flip_requested |= flip_request::emu_requested;
 		}
 	}
 
-	rsx::overlays::message_dialog* thread::shell_open_message_dialog()
+	void thread::handle_emu_flip(u32 buffer)
 	{
-		if (supports_native_ui)
+		if (user_asked_for_frame_capture && !capture_current_frame)
 		{
-			auto ptr = new rsx::overlays::message_dialog();
-			m_custom_ui.reset(ptr);
-			return ptr;
-		}
-		else
-		{
-			return nullptr;
-		}
-	}
+			capture_current_frame = true;
+			user_asked_for_frame_capture = false;
+			frame_debug.reset();
+			frame_capture.reset();
 
-	rsx::overlays::trophy_notification* thread::shell_open_trophy_notification()
-	{
-		if (supports_native_ui)
-		{
-			auto ptr = new rsx::overlays::trophy_notification();
-			m_custom_ui.reset(ptr);
-			return ptr;
-		}
-		else
-		{
-			return nullptr;
-		}
-	}
+			// random number just to jumpstart the size
+			frame_capture.replay_commands.reserve(8000);
 
-	rsx::overlays::user_interface* thread::shell_get_current_dialog()
-	{
-		//TODO: Only get dialog type interfaces
-		return m_custom_ui.get();
-	}
-
-	bool thread::shell_close_dialog()
-	{
-		//TODO: Only get dialog type interfaces
-		if (m_custom_ui)
+			// capture first tile state with nop cmd
+			rsx::frame_capture_data::replay_command replay_cmd;
+			replay_cmd.rsx_command = std::make_pair(NV4097_NO_OPERATION, 0);
+			frame_capture.replay_commands.push_back(replay_cmd);
+			capture::capture_display_tile_state(this, frame_capture.replay_commands.back());
+		}
+		else if (capture_current_frame)
 		{
-			m_invalidated_ui = std::move(m_custom_ui);
-			shell_do_cleanup();
-			return true;
+			capture_current_frame = false;
+			std::stringstream os;
+			cereal::BinaryOutputArchive archive(os);
+			const std::string& filePath = fs::get_config_dir() + "captures/" + Emu.GetTitleID() + "_" + date_time::current_time_narrow() + "_capture.rrc";
+			archive(frame_capture);
+			{
+				// todo: may want to compress this data?
+				fs::file f(filePath, fs::rewrite);
+				f.write(os.str());
+			}
+
+			LOG_SUCCESS(RSX, "capture successful: %s", filePath.c_str());
+
+			frame_capture.reset();
+			Emu.Pause();
 		}
 
-		return false;
+		double limit = 0.;
+		switch (g_cfg.video.frame_limit)
+		{
+		case frame_limit_type::none: limit = 0.; break;
+		case frame_limit_type::_59_94: limit = 59.94; break;
+		case frame_limit_type::_50: limit = 50.; break;
+		case frame_limit_type::_60: limit = 60.; break;
+		case frame_limit_type::_30: limit = 30.; break;
+		case frame_limit_type::_auto: limit = fps_limit; break; // TODO
+		}
+
+		if (limit)
+		{
+			const u64 time = get_system_time() - Emu.GetPauseTime() - start_rsx_time;
+
+			if (int_flip_index == 0)
+			{
+				start_rsx_time = time;
+			}
+			else
+			{
+				// Convert limit to expected time value
+				double expected = int_flip_index * 1000000. / limit;
+
+				while (time >= expected + 1000000. / limit)
+				{
+					expected = int_flip_index++ * 1000000. / limit;
+				}
+
+				if (expected > time + 1000)
+				{
+					const auto delay_us = static_cast<s64>(expected - time);
+					std::this_thread::sleep_for(std::chrono::milliseconds{ delay_us / 1000 });
+					performance_counters.idle_time += delay_us;
+				}
+			}
+		}
+
+		int_flip_index++;
+		current_display_buffer = buffer;
+		flip(buffer);
+
+		last_flip_time = get_system_time() - 1000000;
+		flip_status = CELL_GCM_DISPLAY_FLIP_STATUS_DONE;
+
+		if (flip_handler)
+		{
+			intr_thread->cmd_list
+			({
+				{ ppu_cmd::set_args, 1 }, u64{ 1 },
+				{ ppu_cmd::lle_call, flip_handler },
+				{ ppu_cmd::sleep, 0 }
+			});
+
+			thread_ctrl::notify(*intr_thread);
+		}
+
+		sys_rsx_context_attribute(0x55555555, 0xFEC, buffer, 0, 0, 0);
 	}
+
 
 	namespace reports
 	{
@@ -2398,7 +2589,7 @@ namespace rsx
 				if (!It->sink)
 				{
 					It->counter_tag = m_statistics_tag_id;
-					It->due_tsc = m_tsc + m_cycles_delay;
+					It->due_tsc = get_system_time() + m_cycles_delay;
 					It->sink = sink;
 					It->type = type;
 
@@ -2421,7 +2612,7 @@ namespace rsx
 		void ZCULL_control::allocate_new_query(::rsx::thread* ptimer)
 		{
 			int retries = 0;
-			while (!Emu.IsStopped())
+			while (true)
 			{
 				for (u32 n = 0; n < occlusion_query_count; ++n)
 				{
@@ -2461,7 +2652,7 @@ namespace rsx
 				}
 
 				//All slots are occupied, try to pop the earliest entry
-				m_tsc += max_zcull_cycles_delay;
+				m_tsc += max_zcull_delay_us;
 				update(ptimer);
 
 				retries++;
@@ -2500,7 +2691,7 @@ namespace rsx
 			if (m_current_task)
 				m_current_task->num_draws++;
 
-			m_cycles_delay = max_zcull_cycles_delay;
+			m_cycles_delay = max_zcull_delay_us;
 		}
 
 		void ZCULL_control::write(vm::addr_t sink, u32 timestamp, u32 type, u32 value)
@@ -2550,7 +2741,8 @@ namespace rsx
 					{
 						verify(HERE), query->pending;
 
-						if (!result && query->num_draws)
+						const bool implemented = (writer.type == CELL_GCM_ZPASS_PIXEL_CNT || writer.type == CELL_GCM_ZCULL_STATS3);
+						if (implemented && !result && query->num_draws)
 						{
 							get_occlusion_query_result(query);
 
@@ -2611,16 +2803,42 @@ namespace rsx
 				ptimer->async_tasks_pending -= processed;
 			}
 
+			if (ptimer->conditional_render_enabled && ptimer->conditional_render_test_address)
+			{
+				ptimer->conditional_render_test_failed = vm::read32(ptimer->conditional_render_test_address) == 0;
+				ptimer->conditional_render_test_address = 0;
+			}
+
 			//Critical, since its likely a WAIT_FOR_IDLE type has been processed, all results are considered available
-			m_cycles_delay = min_zcull_cycles_delay;
+			m_cycles_delay = min_zcull_delay_us;
+			m_tsc = std::max(m_tsc, get_system_time());
 		}
 
-		void ZCULL_control::update(::rsx::thread* ptimer)
+		void ZCULL_control::update(::rsx::thread* ptimer, u32 sync_address)
 		{
-			m_tsc++;
-
 			if (m_pending_writes.empty())
+			{
 				return;
+			}
+
+			const auto& front = m_pending_writes.front();
+			if (!front.sink)
+			{
+				// No writables in queue, abort
+				return;
+			}
+
+			// Update timestamp and proceed with processing only if there is work to be done
+			m_tsc = std::max(m_tsc, get_system_time());
+
+			if (!sync_address)
+			{
+				if (m_tsc < front.due_tsc)
+				{
+					// Avoid spamming backend with report status updates
+					return;
+				}
+			}
 
 			u32 stat_tag_to_remove = m_statistics_tag_id;
 			u32 processed = 0;
@@ -2641,13 +2859,21 @@ namespace rsx
 				auto query = writer.query;
 				u32 result = m_statistics_map[writer.counter_tag];
 
+				const bool force_read = (sync_address != 0);
+				if (force_read && writer.sink == sync_address)
+				{
+					// Forced reads end here
+					sync_address = 0;
+				}
+
 				if (query)
 				{
 					verify(HERE), query->pending;
 
-					if (UNLIKELY(writer.due_tsc < m_tsc))
+					const bool implemented = (writer.type == CELL_GCM_ZPASS_PIXEL_CNT || writer.type == CELL_GCM_ZCULL_STATS3);
+					if (force_read || writer.due_tsc < m_tsc)
 					{
-						if (!result && query->num_draws)
+						if (implemented && !result && query->num_draws)
 						{
 							get_occlusion_query_result(query);
 
@@ -2665,12 +2891,7 @@ namespace rsx
 					}
 					else
 					{
-						if (result || !query->num_draws)
-						{
-							//Not necessary to read the result anymore
-							discard_occlusion_query(query);
-						}
-						else
+						if (implemented && !result && query->num_draws)
 						{
 							//Maybe we get lucky and results are ready
 							if (check_occlusion_query_status(query))
@@ -2687,6 +2908,11 @@ namespace rsx
 								//Too early; abort
 								break;
 							}
+						}
+						else
+						{
+							//Not necessary to read the result anymore
+							discard_occlusion_query(query);
 						}
 					}
 
@@ -2734,13 +2960,20 @@ namespace rsx
 				return;
 
 			const auto memory_end = memory_address + memory_range;
-			for (const auto &writer : m_pending_writes)
+			u32 sync_address = 0;
+
+			for (auto It = m_pending_writes.crbegin(); It != m_pending_writes.crend(); ++It)
 			{
-				if (writer.sink >= memory_address && writer.sink < memory_end)
+				if (It->sink >= memory_address && It->sink < memory_end)
 				{
-					sync(ptimer);
-					return;
+					sync_address = It->sink;
+					break;
 				}
+			}
+
+			if (sync_address)
+			{
+				update(ptimer, sync_address);
 			}
 		}
 	}

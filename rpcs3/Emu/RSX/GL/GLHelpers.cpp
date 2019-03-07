@@ -1,5 +1,6 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "GLHelpers.h"
+#include "GLTexture.h"
 #include "Utilities/Log.h"
 
 namespace gl
@@ -35,11 +36,15 @@ namespace gl
 		switch (type)
 		{
 		case GL_DEBUG_TYPE_ERROR:
+		{
 			LOG_ERROR(RSX, "%s", message);
 			return;
+		}
 		default:
+		{
 			LOG_WARNING(RSX, "%s", message);
 			return;
+		}
 		}
 	}
 #endif
@@ -306,277 +311,29 @@ namespace gl
 		return m_size;
 	}
 
-	void texture::settings::apply(const texture &texture) const
+	bool fbo::matches(const std::array<GLuint, 4>& color_targets, GLuint depth_stencil_target) const
 	{
-		save_binding_state save(texture);
-
-		texture.pixel_unpack_settings().apply();
-
-		if (compressed_format(m_internal_format))
+		for (u32 index = 0; index < 4; ++index)
 		{
-			int compressed_image_size = m_compressed_image_size;
-			if (!compressed_image_size)
+			if (color[index].resource_id() != color_targets[index])
 			{
-				switch (m_internal_format)
-				{
-				case texture::internal_format::compressed_rgb_s3tc_dxt1:
-					compressed_image_size = ((m_width + 2) / 3) * ((m_height + 2) / 3) * 6;
-					break;
-
-				case texture::internal_format::compressed_rgba_s3tc_dxt1:
-					compressed_image_size = ((m_width + 3) / 4) * ((m_height + 3) / 4) * 8;
-					break;
-
-				case texture::internal_format::compressed_rgba_s3tc_dxt3:
-				case texture::internal_format::compressed_rgba_s3tc_dxt5:
-					compressed_image_size = ((m_width + 3) / 4) * ((m_height + 3) / 4) * 16;
-					break;
-				default:
-					fmt::throw_exception("Tried to load unimplemented internal_format type." HERE);
-					break;
-				}
-			}
-
-			if (m_parent->get_target() != gl::texture::target::texture2D)
-				fmt::throw_exception("Mutable compressed texture of non-2D type is unimplemented" HERE);
-
-			glCompressedTexImage2D((GLenum)m_parent->get_target(), m_level, (GLint)m_internal_format, m_width, m_height, 0, compressed_image_size, m_pixels);
-		}
-		else
-		{
-			switch ((GLenum)m_parent->get_target())
-			{
-			case GL_TEXTURE_1D:
-			{
-				glTexImage1D(GL_TEXTURE_1D, m_level, (GLint)m_internal_format, m_width, 0, (GLint)m_format, (GLint)m_type, m_pixels);
-				break;
-			}
-			case GL_TEXTURE_2D:
-			{
-				glTexImage2D(GL_TEXTURE_2D, m_level, (GLint)m_internal_format, m_width, m_height, 0, (GLint)m_format, (GLint)m_type, m_pixels);
-				break;
-			}
-			case GL_TEXTURE_3D:
-			{
-				glTexImage3D(GL_TEXTURE_3D, m_level, (GLint)m_internal_format, m_width, m_height, m_depth, 0, (GLint)m_format, (GLint)m_type, m_pixels);
-				break;
-			}
-			case GL_TEXTURE_CUBE_MAP:
-			{
-				for (int face = 0; face < 6; ++face)
-					glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, m_level, (GLint)m_internal_format, m_width, m_height, 0, (GLint)m_format, (GLint)m_type, m_pixels);
-				break;
-			}
+				return false;
 			}
 		}
 
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_MAX_LEVEL, m_max_level);
+		const auto depth_resource = depth.resource_id() | depth_stencil.resource_id();
+		return (depth_resource == depth_stencil_target);
+	}
 
-		if (m_pixels && m_generate_mipmap)
+	bool fbo::references_any(const std::vector<GLuint>& resources) const
+	{
+		for (const auto &e : m_resource_bindings)
 		{
-			glGenerateMipmap((GLenum)m_parent->get_target());
+			if (std::find(resources.begin(), resources.end(), e.second) != resources.end())
+				return true;
 		}
 
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_WRAP_S, (GLint)m_wrap_s);
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_WRAP_T, (GLint)m_wrap_t);
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_WRAP_R, (GLint)m_wrap_r);
-
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_COMPARE_MODE, (GLint)m_compare_mode);
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_COMPARE_FUNC, (GLint)m_compare_func);
-
-		glTexParameterf((GLenum)m_parent->get_target(), GL_TEXTURE_MIN_LOD, m_max_lod);
-		glTexParameterf((GLenum)m_parent->get_target(), GL_TEXTURE_MAX_LOD, m_min_lod);
-		glTexParameterf((GLenum)m_parent->get_target(), GL_TEXTURE_LOD_BIAS, m_lod);
-
-		glTexParameterfv((GLenum)m_parent->get_target(), GL_TEXTURE_BORDER_COLOR, m_border_color.rgba);
-
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_MIN_FILTER, (GLint)m_min_filter);
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_MAG_FILTER, (GLint)m_mag_filter);
-
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_SWIZZLE_R, (GLint)m_swizzle_r);
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_SWIZZLE_G, (GLint)m_swizzle_g);
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_SWIZZLE_B, (GLint)m_swizzle_b);
-		glTexParameteri((GLenum)m_parent->get_target(), GL_TEXTURE_SWIZZLE_A, (GLint)m_swizzle_a);
-
-		glTexParameterf((GLenum)m_parent->get_target(), GL_TEXTURE_MAX_ANISOTROPY_EXT, m_aniso);
-	}
-
-	void texture::settings::apply()
-	{
-		if (m_parent)
-		{
-			apply(*m_parent);
-			m_parent = nullptr;
-		}
-	}
-
-	texture::settings& texture::settings::swizzle(texture::channel r, texture::channel g, texture::channel b, texture::channel a)
-	{
-		m_swizzle_r = r;
-		m_swizzle_g = g;
-		m_swizzle_b = b;
-		m_swizzle_a = a;
-
-		return *this;
-	}
-
-	texture::settings& texture::settings::format(texture::format format)
-	{
-		m_format = format;
-		return *this;
-	}
-
-	texture::settings& texture::settings::type(texture::type type)
-	{
-		m_type = type;
-		return *this;
-	}
-
-	texture::settings& texture::settings::internal_format(texture::internal_format format)
-	{
-		m_internal_format = format;
-		return *this;
-	}
-
-	texture::settings& texture::settings::filter(min_filter min_filter, gl::filter mag_filter)
-	{
-		m_min_filter = min_filter;
-		m_mag_filter = mag_filter;
-
-		return *this;
-	}
-
-	texture::settings& texture::settings::width(uint width)
-	{
-		m_width = width;
-		return *this;
-	}
-
-	texture::settings& texture::settings::height(uint height)
-	{
-		m_height = height;
-		return *this;
-	}
-
-	texture::settings& texture::settings::depth(uint depth)
-	{
-		m_depth = depth;
-		return *this;
-	}
-
-	texture::settings& texture::settings::size(sizei size)
-	{
-		return width(size.width).height(size.height);
-	}
-
-	texture::settings& texture::settings::level(int value)
-	{
-		m_level = value;
-		return *this;
-	}
-
-	texture::settings& texture::settings::compressed_image_size(int size)
-	{
-		m_compressed_image_size = size;
-		return *this;
-	}
-
-	texture::settings& texture::settings::pixels(const void* pixels)
-	{
-		m_pixels = pixels;
-		return *this;
-	}
-
-	texture::settings& texture::settings::aniso(float value)
-	{
-		m_aniso = value;
-		return *this;
-	}
-
-	texture::settings& texture::settings::compare_mode(texture::compare_mode value)
-	{
-		m_compare_mode = value;
-		return *this;
-	}
-	texture::settings& texture::settings::compare_func(texture::compare_func value)
-	{
-		m_compare_func = value;
-		return *this;
-	}
-	texture::settings& texture::settings::compare(texture::compare_func func, texture::compare_mode mode)
-	{
-		return compare_func(func).compare_mode(mode);
-	}
-
-	texture::settings& texture::settings::wrap_s(texture::wrap value)
-	{
-		m_wrap_s = value;
-		return *this;
-	}
-	texture::settings& texture::settings::wrap_t(texture::wrap value)
-	{
-		m_wrap_t = value;
-		return *this;
-	}
-	texture::settings& texture::settings::wrap_r(texture::wrap value)
-	{
-		m_wrap_r = value;
-		return *this;
-	}
-	texture::settings& texture::settings::wrap(texture::wrap s, texture::wrap t, texture::wrap r)
-	{
-		return wrap_s(s).wrap_t(t).wrap_r(r);
-	}
-
-	texture::settings& texture::settings::max_lod(float value)
-	{
-		m_max_lod = value;
-		return *this;
-	}
-	texture::settings& texture::settings::min_lod(float value)
-	{
-		m_min_lod = value;
-		return *this;
-	}
-	texture::settings& texture::settings::lod(float value)
-	{
-		m_lod = value;
-		return *this;
-	}
-	texture::settings& texture::settings::max_level(int value)
-	{
-		m_max_level = value;
-		return *this;
-	}
-	texture::settings& texture::settings::generate_mipmap(bool value)
-	{
-		m_generate_mipmap = value;
-		return *this;
-	}
-	texture::settings& texture::settings::mipmap(int level, int max_level, float lod, float min_lod, float max_lod, bool generate)
-	{
-		return this->level(level).max_level(max_level).lod(lod).min_lod(min_lod).max_lod(max_lod).generate_mipmap(generate);
-	}
-
-	texture::settings& texture::settings::border_color(color4f value)
-	{
-		m_border_color = value;
-		return *this;
-	}
-
-	texture_view texture::with_level(int level)
-	{
-		return{ get_target(), id() };
-	}
-
-	texture::settings texture::config()
-	{
-		return{ this };
-	}
-
-	void texture::config(const settings& settings_)
-	{
-		settings_.apply(*this);
+		return false;
 	}
 
 	bool is_primitive_native(rsx::primitive_type in)
@@ -603,5 +360,140 @@ namespace gl
 	attrib_t vao::operator[](u32 index) const noexcept
 	{
 		return attrib_t(index);
+	}
+
+	void blitter::scale_image(gl::command_context& cmd, const texture* src, texture* dst, areai src_rect, areai dst_rect, bool linear_interpolation,
+		bool is_depth_copy, const rsx::typeless_xfer& xfer_info)
+	{
+		std::unique_ptr<texture> typeless_src;
+		std::unique_ptr<texture> typeless_dst;
+		u32 src_id = src->id();
+		u32 dst_id = dst->id();
+
+		if (xfer_info.src_is_typeless)
+		{
+			const auto internal_width = (u16)(src->width() * xfer_info.src_scaling_hint);
+			const auto internal_fmt = xfer_info.src_native_format_override ?
+				GLenum(xfer_info.src_native_format_override) :
+				get_sized_internal_format(xfer_info.src_gcm_format);
+
+			typeless_src = std::make_unique<texture>(GL_TEXTURE_2D, internal_width, src->height(), 1, 1, internal_fmt);
+			copy_typeless(typeless_src.get(), src);
+
+			src_id = typeless_src->id();
+			src_rect.x1 = (u16)(src_rect.x1 * xfer_info.src_scaling_hint);
+			src_rect.x2 = (u16)(src_rect.x2 * xfer_info.src_scaling_hint);
+		}
+
+		if (xfer_info.dst_is_typeless)
+		{
+			const auto internal_width = (u16)(dst->width() * xfer_info.dst_scaling_hint);
+			const auto internal_fmt = xfer_info.dst_native_format_override ?
+				GLenum(xfer_info.dst_native_format_override) :
+				get_sized_internal_format(xfer_info.dst_gcm_format);
+
+			typeless_dst = std::make_unique<texture>(GL_TEXTURE_2D, internal_width, dst->height(), 1, 1, internal_fmt);
+			copy_typeless(typeless_dst.get(), dst);
+
+			dst_id = typeless_dst->id();
+			dst_rect.x1 = (u16)(dst_rect.x1 * xfer_info.dst_scaling_hint);
+			dst_rect.x2 = (u16)(dst_rect.x2 * xfer_info.dst_scaling_hint);
+		}
+
+		filter interp = (linear_interpolation && !is_depth_copy) ? filter::linear : filter::nearest;
+		GLenum attachment;
+		gl::buffers target;
+
+		if (is_depth_copy)
+		{
+			if (src->get_internal_format() == gl::texture::internal_format::depth16 ||
+				dst->get_internal_format() == gl::texture::internal_format::depth16)
+			{
+				attachment = GL_DEPTH_ATTACHMENT;
+				target = gl::buffers::depth;
+			}
+			else
+			{
+				attachment = GL_DEPTH_STENCIL_ATTACHMENT;
+				target = gl::buffers::depth_stencil;
+			}
+		}
+		else
+		{
+			attachment = GL_COLOR_ATTACHMENT0;
+			target = gl::buffers::color;
+		}
+
+		cmd.drv->enable(GL_FALSE, GL_SCISSOR_TEST);
+
+		save_binding_state saved;
+
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, blit_src.id());
+		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, attachment, GL_TEXTURE_2D, src_id, 0);
+
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, blit_dst.id());
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, attachment, GL_TEXTURE_2D, dst_id, 0);
+
+		glBlitFramebuffer(src_rect.x1, src_rect.y1, src_rect.x2, src_rect.y2,
+			dst_rect.x1, dst_rect.y1, dst_rect.x2, dst_rect.y2,
+			(GLbitfield)target, (GLenum)interp);
+
+		if (xfer_info.dst_is_typeless)
+		{
+			// Transfer contents from typeless dst back to original dst
+			copy_typeless(dst, typeless_dst.get());
+		}
+
+		// Release the attachments explicitly (not doing so causes glitches, e.g Journey Menu)
+		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, attachment, GL_TEXTURE_2D, GL_NONE, 0);
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, attachment, GL_TEXTURE_2D, GL_NONE, 0);
+	}
+
+	void blitter::fast_clear_image(gl::command_context& cmd, const texture* dst, const color4f& color)
+	{
+		save_binding_state saved;
+
+		blit_dst.bind();
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst->id(), 0);
+		blit_dst.check();
+
+		cmd.drv->clear_color(color);
+		cmd.drv->color_mask(true, true, true, true);
+
+		glClear(GL_COLOR_BUFFER_BIT);
+	}
+
+	void blitter::fast_clear_image(gl::command_context& cmd, const texture* dst, float depth, u8 stencil)
+	{
+		GLenum attachment;
+		GLbitfield clear_mask;
+
+		switch (const auto fmt = dst->get_internal_format())
+		{
+		case texture::internal_format::depth:
+		case texture::internal_format::depth16:
+			clear_mask = GL_DEPTH_BUFFER_BIT;
+			attachment = GL_DEPTH_ATTACHMENT;
+			break;
+		case texture::internal_format::depth_stencil:
+		case texture::internal_format::depth24_stencil8:
+		case texture::internal_format::depth32f_stencil8:
+			clear_mask = GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
+			attachment = GL_DEPTH_STENCIL_ATTACHMENT;
+			break;
+		default:
+			fmt::throw_exception("Invalid texture passed to clear depth function, format=0x%x", (u32)fmt);
+		}
+
+		save_binding_state saved;
+
+		blit_dst.bind();
+		glFramebufferTexture2D(GL_FRAMEBUFFER, attachment, GL_TEXTURE_2D, dst->id(), 0);
+		blit_dst.check();
+
+		cmd.drv->depth_mask(GL_TRUE);
+		cmd.drv->stencil_mask(0xFF);
+
+		glClear(clear_mask);
 	}
 }

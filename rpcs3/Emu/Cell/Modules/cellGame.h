@@ -57,6 +57,7 @@ enum
 	CELL_GAME_DIRNAME_SIZE       = 32,
 	CELL_GAME_HDDGAMEPATH_SIZE   = 128,
 	CELL_GAME_THEMEFILENAME_SIZE = 48,
+
 	CELL_GAME_SYSP_LANGUAGE_NUM  = 20,
 	CELL_GAME_SYSP_TITLE_SIZE    = 128,
 	CELL_GAME_SYSP_TITLEID_SIZE  = 10,
@@ -64,12 +65,11 @@ enum
 	CELL_GAME_SYSP_PS3_SYSTEM_VER_SIZE = 8,
 	CELL_GAME_SYSP_APP_VER_SIZE  = 6,
 
-	CELL_GAME_GAMETYPE_SYS  = 0,
-	CELL_GAME_GAMETYPE_DISC = 1,
-	CELL_GAME_GAMETYPE_HDD  = 2,
-	CELL_GAME_GAMETYPE_HOME = 4,
-
+	CELL_GAME_GAMETYPE_SYS      = 0,
+	CELL_GAME_GAMETYPE_DISC     = 1,
+	CELL_GAME_GAMETYPE_HDD      = 2,
 	CELL_GAME_GAMETYPE_GAMEDATA = 3,
+	CELL_GAME_GAMETYPE_HOME     = 4,
 
 	CELL_GAME_SIZEKB_NOTCALC = -1,
 
@@ -81,6 +81,12 @@ enum
 	CELL_GAME_ATTRIBUTE_INVITE_MESSAGE      = 0x20,
 	CELL_GAME_ATTRIBUTE_CUSTOM_DATA_MESSAGE = 0x40,
 	CELL_GAME_ATTRIBUTE_WEB_BROWSER         = 0x100,
+
+	CELL_GAME_THEME_OPTION_NONE  = 0x0,
+	CELL_GAME_THEME_OPTION_APPLY = 0x1,
+
+	CELL_GAME_DISCTYPE_OTHER = 0,
+	CELL_GAME_DISCTYPE_PS3   = 1,
 };
 
 //Parameter IDs of PARAM.SFO
@@ -202,7 +208,9 @@ struct CellGameDataSystemFileParam
 	be_t<u32> attribute;
 	char reserved2[256];
 };
-struct CellDiscGameSystemFileParam {
+
+struct CellDiscGameSystemFileParam
+{
 	char titleId[CELL_DISCGAME_SYSP_TITLEID_SIZE];
 	char reserved0[2];
 	be_t<u32> parentalLevel;
@@ -234,17 +242,23 @@ struct CellGameDataStatSet
 typedef void(CellGameDataStatCallback)(vm::ptr<CellGameDataCBResult> cbResult, vm::ptr<CellGameDataStatGet> get, vm::ptr<CellGameDataStatSet> set);
 
 // cellSysutil: cellHddGame
+
+enum CellHddGameError : u32
+{
+	CELL_HDDGAME_ERROR_CBRESULT     = 0x8002ba01,
+	CELL_HDDGAME_ERROR_ACCESS_ERROR = 0x8002ba02,
+	CELL_HDDGAME_ERROR_INTERNAL     = 0x8002ba03,
+	CELL_HDDGAME_ERROR_PARAM        = 0x8002ba04,
+	CELL_HDDGAME_ERROR_NOSPACE      = 0x8002ba05,
+	CELL_HDDGAME_ERROR_BROKEN       = 0x8002ba06,
+	CELL_HDDGAME_ERROR_FAILURE      = 0x8002ba07,
+};
+
 enum
 {
 	// Return Codes
-	CELL_HDDGAME_RET_CANCEL            = 1,
-	CELL_HDDGAME_ERROR_CBRESULT        = 0x8002ba01,
-	CELL_HDDGAME_ERROR_ACCESS_ERROR    = 0x8002ba02,
-	CELL_HDDGAME_ERROR_INTERNAL        = 0x8002ba03,
-	CELL_HDDGAME_ERROR_PARAM           = 0x8002ba04,
-	CELL_HDDGAME_ERROR_NOSPACE         = 0x8002ba05,
-	CELL_HDDGAME_ERROR_BROKEN          = 0x8002ba06,
-	CELL_HDDGAME_ERROR_FAILURE         = 0x8002ba07,
+	CELL_HDDGAME_RET_OK     = 0,
+	CELL_HDDGAME_RET_CANCEL = 1,
 
 	// Callback Result
 	CELL_HDDGAME_CBRESULT_OK_CANCEL    = 1,
@@ -319,3 +333,8 @@ struct CellHddGameStatSet
 };
 
 typedef void(CellHddGameStatCallback)(vm::ptr<CellHddGameCBResult> cbResult, vm::ptr<CellHddGameStatGet> get, vm::ptr<CellHddGameStatSet> set);
+typedef void(CellGameThemeInstallCallback)(u32 fileOffset, u32 readSize, vm::ptr<void> buf);
+typedef void(CellGameDiscEjectCallback)(void);
+typedef void(CellGameDiscInsertCallback)(u32 discType, vm::ptr<char> titleId);
+typedef void(CellDiscGameDiscEjectCallback)(void);
+typedef void(CellDiscGameDiscInsertCallback)(u32 discType, vm::ptr<char> titleId);

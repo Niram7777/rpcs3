@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "../Common/surface_store.h"
 #include "GLHelpers.h"
 #include "stdafx.h"
@@ -49,10 +49,8 @@ namespace rsx
 
 namespace gl
 {
-	class render_target : public texture, public rsx::ref_counted, public rsx::render_target_descriptor<u32>
+	class render_target : public viewable_image, public rsx::ref_counted, public rsx::render_target_descriptor<texture*>
 	{
-		bool is_cleared = false;
-
 		u32 rsx_pitch = 0;
 		u16 native_pitch = 0;
 
@@ -62,23 +60,19 @@ namespace gl
 		u16 surface_width = 0;
 		u16 surface_pixel_size = 0;
 
-		texture::internal_format compatible_internal_format = texture::internal_format::rgba8;
-		std::array<GLenum, 4> native_component_mapping;
-		u32 current_remap_encoding = 0;
-
 	public:
-		render_target *old_contents = nullptr;
-
-		render_target() {}
+		render_target(GLuint width, GLuint height, GLenum sized_format)
+			: viewable_image(GL_TEXTURE_2D, width, height, 1, 1, sized_format)
+		{}
 
 		void set_cleared(bool clear=true)
 		{
-			is_cleared = clear;
+			dirty = !clear;
 		}
 
 		bool cleared() const
 		{
-			return is_cleared;
+			return !dirty;
 		}
 
 		// Internal pitch is the actual row length in bytes of the openGL texture
@@ -113,25 +107,12 @@ namespace gl
 			return surface_height;
 		}
 
-		u32 get_surface() override
+		texture* get_surface() override
 		{
-			return get_view(0xAAE4, rsx::default_remap_vector);
+			return (gl::texture*)this;
 		}
 
-		u32 get_view(u32 remap_encoding, const std::pair<std::array<u8, 4>, std::array<u8, 4>>& remap)
-		{
-			if (remap_encoding != current_remap_encoding)
-			{
-				current_remap_encoding = remap_encoding;
-
-				bind();
-				apply_swizzle_remap(GL_TEXTURE_2D, native_component_mapping, remap);
-			}
-
-			return id();
-		}
-
-		u32 get_view()
+		u32 raw_handle() const
 		{
 			//Get view with components in true native layout
 			//TODO: Implement real image views
@@ -142,16 +123,6 @@ namespace gl
 			//Reset view encoding
 			current_remap_encoding = 0;
 			return id();
-		}
-
-		void set_compatible_format(texture::internal_format format)
-		{
-			compatible_internal_format = format;
-		}
-
-		texture::internal_format get_compatible_internal_format() const override
-		{
-			return compatible_internal_format;
 		}
 
 		void update_surface()
@@ -170,9 +141,18 @@ namespace gl
 
 		bool matches_dimensions(u16 _width, u16 _height) const
 		{
-			//Use foward scaling to account for rounding and clamping errors
+			//Use forward scaling to account for rounding and clamping errors
 			return (rsx::apply_resolution_scale(_width, true) == internal_width) && (rsx::apply_resolution_scale(_height, true) == internal_height);
 		}
+
+		void memory_barrier(gl::command_context& cmd, bool force_init = false);
+		void read_barrier(gl::command_context& cmd) { memory_barrier(cmd, true); }
+		void write_barrier(gl::command_context& cmd) { memory_barrier(cmd, false); }
+	};
+
+	struct framebuffer_holder : public gl::fbo, public rsx::ref_counted
+	{
+		using gl::fbo::fbo;
 	};
 }
 
@@ -185,78 +165,54 @@ struct gl_render_target_traits
 
 	static
 	std::unique_ptr<gl::render_target> create_new_surface(
-		u32 /*address*/,
+		u32 address,
 		rsx::surface_color_format surface_color_format,
 		size_t width,
 		size_t height,
 		gl::render_target* old_surface
 	)
 	{
-		std::unique_ptr<gl::render_target> result(new gl::render_target());
-
 		auto format = rsx::internals::surface_color_format_to_gl(surface_color_format);
 		auto internal_fmt = rsx::internals::sized_internal_format(surface_color_format);
 
-		result->recreate(gl::texture::target::texture2D);
+		std::unique_ptr<gl::render_target> result(new gl::render_target(rsx::apply_resolution_scale((u16)width, true),
+			rsx::apply_resolution_scale((u16)height, true), (GLenum)internal_fmt));
 		result->set_native_pitch((u16)width * format.channel_count * format.channel_size);
-		result->set_compatible_format(internal_fmt);
 
-		__glcheck result->config()
-			.size({ (int)rsx::apply_resolution_scale((u16)width, true), (int)rsx::apply_resolution_scale((u16)height, true) })
-			.type(format.type)
-			.format(format.format)
-			.internal_format(internal_fmt)
-			.swizzle(format.swizzle.r, format.swizzle.g, format.swizzle.b, format.swizzle.a)
-			.wrap(gl::texture::wrap::clamp_to_border, gl::texture::wrap::clamp_to_border, gl::texture::wrap::clamp_to_border)
-			.apply();
-
-		__glcheck result->pixel_pack_settings().swap_bytes(format.swap_bytes).aligment(1);
-		__glcheck result->pixel_unpack_settings().swap_bytes(format.swap_bytes).aligment(1);
-
+		std::array<GLenum, 4> native_layout = { (GLenum)format.swizzle.a, (GLenum)format.swizzle.r, (GLenum)format.swizzle.g, (GLenum)format.swizzle.b };
+		result->set_native_component_layout(native_layout);
 		result->old_contents = old_surface;
 
-		result->set_cleared();
+		result->queue_tag(address);
+		result->set_cleared(false);
 		result->update_surface();
 		return result;
 	}
 
 	static
 	std::unique_ptr<gl::render_target> create_new_surface(
-			u32 /*address*/,
+			u32 address,
 		rsx::surface_depth_format surface_depth_format,
 			size_t width,
 			size_t height,
 			gl::render_target* old_surface
 		)
 	{
-		std::unique_ptr<gl::render_target> result(new gl::render_target());
-
 		auto format = rsx::internals::surface_depth_format_to_gl(surface_depth_format);
-		result->recreate(gl::texture::target::texture2D);
-
-		const auto scale = rsx::get_resolution_scale();
-
-		__glcheck result->config()
-			.size({ (int)rsx::apply_resolution_scale((u16)width, true), (int)rsx::apply_resolution_scale((u16)height, true) })
-			.type(format.type)
-			.format(format.format)
-			.internal_format(format.internal_format)
-			.swizzle(gl::texture::channel::r, gl::texture::channel::r, gl::texture::channel::r, gl::texture::channel::r)
-			.wrap(gl::texture::wrap::clamp_to_border, gl::texture::wrap::clamp_to_border, gl::texture::wrap::clamp_to_border)
-			.apply();
-
-		__glcheck result->pixel_pack_settings().aligment(1);
-		__glcheck result->pixel_unpack_settings().aligment(1);
+		std::unique_ptr<gl::render_target> result(new gl::render_target(rsx::apply_resolution_scale((u16)width, true),
+				rsx::apply_resolution_scale((u16)height, true), (GLenum)format.internal_format));
 
 		u16 native_pitch = (u16)width * 2;
 		if (surface_depth_format == rsx::surface_depth_format::z24s8)
 			native_pitch *= 2;
 
+		std::array<GLenum, 4> native_layout = { GL_RED, GL_RED, GL_RED, GL_RED };
 		result->set_native_pitch(native_pitch);
-		result->set_compatible_format(format.internal_format);
-
+		result->set_native_component_layout(native_layout);
 		result->old_contents = old_surface;
 
+		result->queue_tag(address);
+		result->set_cleared(false);
 		result->update_surface();
 		return result;
 	}
@@ -277,12 +233,24 @@ struct gl_render_target_traits
 	static void prepare_ds_for_drawing(void *, gl::render_target *ds) { ds->reset_refs(); }
 	static void prepare_ds_for_sampling(void *, gl::render_target*) {}
 
-	static void invalidate_rtt_surface_contents(void *, gl::render_target *rtt, gl::render_target* /*old*/, bool forced) { if (forced) rtt->set_cleared(false); }
-	static void invalidate_depth_surface_contents(void *, gl::render_target *ds, gl::render_target* /*old*/, bool) { ds->set_cleared(false);  }
+	static
+	void invalidate_surface_contents(u32 address, void *, gl::render_target *surface, gl::render_target* old_surface)
+	{
+		surface->old_contents = old_surface;
+		surface->reset_aa_mode();
+		surface->queue_tag(address);
+		surface->set_cleared(false);
+	}
 
 	static
 	void notify_surface_invalidated(const std::unique_ptr<gl::render_target>&)
 	{}
+
+	static
+	void notify_surface_persist(const std::unique_ptr<gl::render_target>& surface)
+	{
+		surface->save_aa_mode();
+	}
 
 	static
 	bool rtt_has_format_width_height(const std::unique_ptr<gl::render_target> &rtt, rsx::surface_color_format format, size_t width, size_t height, bool check_refs=false)
@@ -291,7 +259,7 @@ struct gl_render_target_traits
 			return false;
 
 		auto internal_fmt = rsx::internals::sized_internal_format(format);
-		return rtt->get_compatible_internal_format() == internal_fmt && rtt->matches_dimensions((u16)width, (u16)height);
+		return rtt->get_internal_format() == internal_fmt && rtt->matches_dimensions((u16)width, (u16)height);
 	}
 
 	static
@@ -309,7 +277,7 @@ struct gl_render_target_traits
 	{
 		auto pixel_format = rsx::internals::surface_color_format_to_gl(color_format);
 		std::vector<u8> result(width * height * pixel_format.channel_count * pixel_format.channel_size);
-		color_buffer->bind();
+		glBindTexture(GL_TEXTURE_2D, color_buffer->id());
 		glGetTexImage(GL_TEXTURE_2D, 0, (GLenum)pixel_format.format, (GLenum)pixel_format.type, result.data());
 		return result;
 	}
@@ -319,7 +287,7 @@ struct gl_render_target_traits
 		std::vector<u8> result(width * height * 4);
 
 		auto pixel_format = rsx::internals::surface_depth_format_to_gl(depth_format);
-		depth_stencil_buffer->bind();
+		glBindTexture(GL_TEXTURE_2D, depth_stencil_buffer->id());
 		glGetTexImage(GL_TEXTURE_2D, 0, (GLenum)pixel_format.format, (GLenum)pixel_format.type, result.data());
 		return result;
 	}
@@ -349,18 +317,21 @@ struct gl_render_target_traits
 
 struct gl_render_targets : public rsx::surface_store<gl_render_target_traits>
 {
-	void free_invalidated()
+	std::vector<GLuint> free_invalidated()
 	{
+		std::vector<GLuint> removed;
 		invalidated_resources.remove_if([&](auto &rtt)
 		{
 			if (rtt->deref_count >= 2)
 			{
-				rtt->remove();
+				removed.push_back(rtt->id());
 				return true;
 			}
 
 			rtt->deref_count++;
 			return false;
 		});
+
+		return removed;
 	}
 };

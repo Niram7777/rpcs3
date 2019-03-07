@@ -30,7 +30,9 @@ class main_window : public QMainWindow
 	Ui::main_window *ui;
 
 	bool m_sys_menu_opened;
+	bool m_is_list_mode = true;
 	bool m_save_slider_pos = false;
+	int m_other_slider_pos = 0;
 
 	QIcon m_appIcon;
 	QIcon m_icon_play;
@@ -62,18 +64,19 @@ class main_window : public QMainWindow
 		drop_pup,
 		drop_rap,
 		drop_dir,
-		drop_game
+		drop_game,
+		drop_rrc
 	};
 
 public:
 	explicit main_window(std::shared_ptr<gui_settings> guiSettings, std::shared_ptr<emu_settings> emuSettings, QWidget *parent = 0);
 	void Init();
 	~main_window();
-	void CreateThumbnailToolbar();
 	QIcon GetAppIcon();
 
 Q_SIGNALS:
 	void RequestGlobalStylesheetChange(const QString& sheetFilePath);
+	void RequestTrophyManagerRepaint();
 
 public Q_SLOTS:
 	void OnEmuStop();
@@ -85,14 +88,17 @@ public Q_SLOTS:
 	void RepaintGui();
 
 private Q_SLOTS:
-	void Boot(const std::string& path, bool direct = false, bool add_only = false);
+	void OnPlayOrPause();
+	void Boot(const std::string& path, bool direct = false, bool add_only = false, bool force_global_config = false);
 	void BootElf();
 	void BootGame();
+	void BootRsxCapture(std::string path = "");
 	void DecryptSPRXLibraries();
 
 	void SaveWindowState();
 	void ConfigureGuiFromSettings(bool configure_all = false);
 	void SetIconSizeActions(int idx);
+	void ResizeIcons(int index);
 
 protected:
 	void closeEvent(QCloseEvent *event) override;
@@ -104,14 +110,14 @@ protected:
 	void dragLeaveEvent(QDragLeaveEvent* event) override;
 	void SetAppIconFromPath(const std::string& path);
 private:
-	void RepaintToolbar();
 	void RepaintToolBarIcons();
 	void RepaintThumbnailIcons();
 	void CreateActions();
 	void CreateConnects();
 	void CreateDockWindows();
 	void EnableMenus(bool enabled);
-	void InstallPkg(const QString& dropPath = "");
+	void ShowTitleBars(bool show);
+	void InstallPkg(const QString& dropPath = "", bool is_bulk = false);
 	void InstallPup(const QString& dropPath = "");
 
 	int IsValidFile(const QMimeData& md, QStringList* dropPaths = nullptr);
@@ -127,6 +133,8 @@ private:
 	QActionGroup* m_iconSizeActGroup;
 	QActionGroup* m_listModeActGroup;
 	QActionGroup* m_categoryVisibleActGroup;
+
+	QMessageBox::StandardButton m_install_bulk = QMessageBox::NoButton;
 
 	// Dockable widget frames
 	QMainWindow *m_mw;

@@ -2,6 +2,7 @@
 #include "qt_utils.h"
 #include <QApplication>
 #include <QBitmap>
+#include <QFontMetrics>
 #include <QPainter>
 #include <QScreen>
 
@@ -154,6 +155,77 @@ namespace gui
 			}
 
 			return image.copy(QRect(QPoint(w_max, h_max), QPoint(w_min, h_min)));
+		}
+
+		// taken from https://stackoverflow.com/a/30818424/8353754
+		// because size policies won't work as expected (see similar bugs in Qt bugtracker)
+		void resize_combo_box_view(QComboBox* combo)
+		{
+			int max_width = 0;
+			QFontMetrics font_metrics(combo->font());
+
+			for (int i = 0; i < combo->count(); ++i)
+			{
+				max_width = std::max(max_width, font_metrics.width(combo->itemText(i)));
+			}
+
+			if (combo->view()->minimumWidth() < max_width)
+			{
+				// add scrollbar width and margin
+				max_width += combo->style()->pixelMetric(QStyle::PM_ScrollBarExtent);
+				max_width += combo->view()->autoScrollMargin();
+				combo->view()->setMinimumWidth(max_width);
+			}
+		};
+
+		void update_table_item_count(QTableWidget* table)
+		{
+			if (!table)
+				return;
+
+			int item_count = table->rowCount();
+			bool is_empty = item_count < 1;
+			if (is_empty)
+				table->insertRow(0);
+
+			int item_height = table->rowHeight(0);
+			if (is_empty)
+			{
+				table->clearContents();
+				table->setRowCount(0);
+			}
+
+			int available_height = table->rect().height() - table->horizontalHeader()->height() - table->frameWidth() * 2;
+			if (available_height < item_height || item_height < 1)
+				return;
+
+			int new_item_count = available_height / item_height;
+			if (new_item_count == item_count)
+				return;
+
+			item_count = new_item_count;
+			table->clearContents();
+			table->setRowCount(0);
+
+			for (u32 i = 0; i < item_count; ++i)
+				table->insertRow(i);
+
+			if (table->horizontalScrollBar())
+				table->removeRow(--item_count);
+		}
+
+		void show_windowed_image(const QImage& img, const QString& title)
+		{
+			if (img.isNull())
+				return;
+
+			QLabel* canvas = new QLabel();
+			canvas->setWindowTitle(title);
+			canvas->setObjectName("windowed_image");
+			canvas->setPixmap(QPixmap::fromImage(img));
+			canvas->setFixedSize(img.size());
+			canvas->ensurePolished();
+			canvas->show();
 		}
 	} // utils
 } // gui

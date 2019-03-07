@@ -9,7 +9,7 @@
 #include "Emu/Cell/lv2/sys_tty.h"
 #include "sysPrxForUser.h"
 
-logs::channel sysPrxForUser("sysPrxForUser");
+LOG_CHANNEL(sysPrxForUser);
 
 extern u64 get_system_time();
 
@@ -144,14 +144,27 @@ s32 sys_lv2coredump_D725F320()
 	fmt::raw_error(__func__);
 }
 
-s32 sys_crash_dump_get_user_log_area()
+error_code sys_crash_dump_get_user_log_area(u8 index, vm::ptr<sys_crash_dump_log_area_info_t> entry)
 {
-	fmt::raw_error(__func__);
+	sysPrxForUser.todo("sys_crash_dump_get_user_log_area(index=%d, entry=*0x%x)", index, entry);
+
+	if (index > SYS_CRASH_DUMP_MAX_LOG_AREA || !entry)
+	{
+		return CELL_EINVAL;
+	}
+
+	return CELL_OK;
 }
 
-s32 sys_crash_dump_set_user_log_area()
+error_code sys_crash_dump_set_user_log_area(u8 index, vm::ptr<sys_crash_dump_log_area_info_t> new_entry)
 {
-	UNIMPLEMENTED_FUNC(logs::HLE);
+	sysPrxForUser.todo("sys_crash_dump_set_user_log_area(index=%d, new_entry=*0x%x)", index, new_entry);
+
+	if (index > SYS_CRASH_DUMP_MAX_LOG_AREA || !new_entry)
+	{
+		return CELL_EINVAL;
+	}
+
 	return CELL_OK;
 }
 

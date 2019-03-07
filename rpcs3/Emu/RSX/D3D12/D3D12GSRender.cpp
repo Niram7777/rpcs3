@@ -134,6 +134,11 @@ namespace
 	}
 }
 
+u64 D3D12GSRender::get_cycles()
+{
+	return thread_ctrl::get_cycles(static_cast<named_thread<D3D12GSRender>&>(*this));
+}
+
 D3D12GSRender::D3D12GSRender()
 	: GSRender()
 	, m_d3d12_lib()
@@ -298,13 +303,18 @@ void D3D12GSRender::on_init_thread()
 
 void D3D12GSRender::on_exit()
 {
-	return GSRender::on_exit();
+	GSRender::on_exit();
 }
 
-void D3D12GSRender::do_local_task(bool)
+void D3D12GSRender::do_local_task(rsx::FIFO_state state)
 {
-	//TODO
-	m_frame->clear_wm_events();
+	if (state != rsx::FIFO_state::lock_wait)
+	{
+		//TODO
+		m_frame->clear_wm_events();
+	}
+
+	rsx::thread::do_local_task(state);
 }
 
 bool D3D12GSRender::do_method(u32 cmd, u32 arg)
@@ -389,17 +399,17 @@ void D3D12GSRender::end()
 		.Offset((INT)currentDescriptorIndex + vertex_buffer_count, m_descriptor_stride_srv_cbv_uav)
 		);
 
-	if (m_transform_constants_dirty && !g_cfg.video.debug_output)
+	if (!g_cfg.video.debug_output && (m_graphics_state & rsx::pipeline_state::transform_constants_dirty))
 	{
 		m_current_transform_constants_buffer_descriptor_id = (u32)currentDescriptorIndex + 1 + vertex_buffer_count;
 		upload_and_bind_vertex_shader_constants(currentDescriptorIndex + 1 + vertex_buffer_count);
-		m_transform_constants_dirty = false;
 		get_current_resource_storage().command_list->SetGraphicsRootDescriptorTable(VERTEX_CONSTANT_BUFFERS_SLOT,
 			CD3DX12_GPU_DESCRIPTOR_HANDLE(get_current_resource_storage().descriptors_heap->GetGPUDescriptorHandleForHeapStart())
 			.Offset(m_current_transform_constants_buffer_descriptor_id, m_descriptor_stride_srv_cbv_uav)
 			);
 	}
 
+	m_graphics_state &= ~rsx::pipeline_state::memory_barrier_bits;
 
 	std::chrono::time_point<steady_clock> constants_duration_end = steady_clock::now();
 	m_timers.constants_duration += std::chrono::duration_cast<std::chrono::microseconds>(constants_duration_end - constants_duration_start).count();

@@ -54,7 +54,7 @@
      </rect>
     </property>
     <property name="sizePolicy">
-     <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+     <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
       <horstretch>0</horstretch>
       <verstretch>0</verstretch>
      </sizepolicy>
@@ -85,11 +85,11 @@
       <x>280</x>
       <y>10</y>
       <width>181</width>
-      <height>21</height>
+      <height>31</height>
      </rect>
     </property>
     <property name="sizePolicy">
-     <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+     <sizepolicy hsizetype="Fixed" vsizetype="Expanding">
       <horstretch>0</horstretch>
       <verstretch>0</verstretch>
      </sizepolicy>
@@ -141,7 +141,7 @@
      <x>0</x>
      <y>0</y>
      <width>1058</width>
-     <height>26</height>
+     <height>21</height>
     </rect>
    </property>
    <property name="contextMenuPolicy">
@@ -168,6 +168,8 @@
     <addaction name="bootElfAct"/>
     <addaction name="bootGameAct"/>
     <addaction name="bootRecentMenu"/>
+    <addaction name="separator"/>
+    <addaction name="addGamesAct"/>
     <addaction name="separator"/>
     <addaction name="bootInstallPkgAct"/>
     <addaction name="bootInstallPupAct"/>
@@ -221,6 +223,7 @@
     <addaction name="toolsStringSearchAct"/>
     <addaction name="separator"/>
     <addaction name="toolsDecryptSprxLibsAct"/>
+    <addaction name="actionopen_rsx_capture"/>
    </widget>
    <widget class="QMenu" name="menuView">
     <property name="title">
@@ -248,6 +251,9 @@
      </property>
      <addaction name="showCatHDDGameAct"/>
      <addaction name="showCatDiscGameAct"/>
+     <addaction name="showCatPS1GamesAct"/>
+     <addaction name="showCatPS2GamesAct"/>
+     <addaction name="showCatPSPGamesAct"/>
      <addaction name="showCatHomeAct"/>
      <addaction name="showCatAudioVideoAct"/>
      <addaction name="showCatGameDataAct"/>
@@ -257,11 +263,14 @@
     <addaction name="showDebuggerAct"/>
     <addaction name="showLogAct"/>
     <addaction name="separator"/>
+    <addaction name="showTitleBarsAct"/>
     <addaction name="showToolBarAct"/>
     <addaction name="separator"/>
     <addaction name="showGameListAct"/>
     <addaction name="separator"/>
     <addaction name="showHiddenEntriesAct"/>
+    <addaction name="separator"/>
+    <addaction name="showCompatibilityInGridAct"/>
     <addaction name="separator"/>
     <addaction name="refreshGameListAct"/>
     <addaction name="menuGame_List_Mode"/>
@@ -311,7 +320,7 @@
     </size>
    </property>
    <property name="toolButtonStyle">
-    <enum>Qt::ToolButtonIconOnly</enum>
+    <enum>Qt::ToolButtonTextUnderIcon</enum>
    </property>
    <property name="floatable">
     <bool>false</bool>
@@ -322,21 +331,15 @@
    <attribute name="toolBarBreak">
     <bool>false</bool>
    </attribute>
-   <addaction name="toolbar_disc"/>
+   <addaction name="toolbar_open"/>
+   <addaction name="toolbar_refresh"/>
    <addaction name="toolbar_fullscreen"/>
-   <addaction name="toolbar_snap"/>
-   <addaction name="separator"/>
    <addaction name="toolbar_stop"/>
    <addaction name="toolbar_start"/>
-   <addaction name="separator"/>
-   <addaction name="toolbar_controls"/>
    <addaction name="toolbar_config"/>
-   <addaction name="separator"/>
-   <addaction name="toolbar_refresh"/>
+   <addaction name="toolbar_controls"/>
    <addaction name="toolbar_list"/>
    <addaction name="toolbar_grid"/>
-   <addaction name="toolbar_sort"/>
-   <addaction name="separator"/>
   </widget>
   <action name="bootElfAct">
    <property name="text">
@@ -506,9 +509,6 @@
    </property>
   </action>
   <action name="actionManage_Users">
-   <property name="enabled">
-    <bool>false</bool>
-   </property>
    <property name="text">
     <string>User Accounts</string>
    </property>
@@ -598,6 +598,14 @@
    </property>
    <property name="text">
     <string>Show Tool Bar</string>
+   </property>
+  </action>
+  <action name="showCompatibilityInGridAct">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Show Game Compatibility in Grid Mode</string>
    </property>
   </action>
   <action name="refreshGameListAct">
@@ -727,6 +735,39 @@
     <string>Disc Games</string>
    </property>
   </action>
+  <action name="showCatPS1GamesAct">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>PS1 Games</string>
+   </property>
+  </action>
+  <action name="showCatPS2GamesAct">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>PS2 Games</string>
+   </property>
+  </action>
+  <action name="showCatPSPGamesAct">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="checked">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>PSP Games</string>
+   </property>
+  </action>
   <action name="showCatHomeAct">
    <property name="checkable">
     <bool>true</bool>
@@ -774,13 +815,13 @@
   <action name="toolbar_start">
    <property name="icon">
     <iconset resource="../resources.qrc">
-     <normaloff>:/Icons/pause.png</normaloff>:/Icons/pause.png</iconset>
+     <normaloff>:/Icons/play.png</normaloff>:/Icons/play.png</iconset>
    </property>
    <property name="text">
-    <string>start</string>
+    <string>Start</string>
    </property>
    <property name="toolTip">
-    <string>Pause emulation</string>
+    <string>Start emulation</string>
    </property>
   </action>
   <action name="toolbar_stop">
@@ -789,7 +830,7 @@
      <normaloff>:/Icons/stop.png</normaloff>:/Icons/stop.png</iconset>
    </property>
    <property name="text">
-    <string>stop</string>
+    <string>Stop</string>
    </property>
    <property name="toolTip">
     <string>Stop emulation</string>
@@ -801,7 +842,7 @@
      <normaloff>:/Icons/configure.png</normaloff>:/Icons/configure.png</iconset>
    </property>
    <property name="text">
-    <string>config</string>
+    <string>Config</string>
    </property>
    <property name="toolTip">
     <string>Configuration</string>
@@ -810,37 +851,13 @@
   <action name="toolbar_controls">
    <property name="icon">
     <iconset resource="../resources.qrc">
-     <normaloff>:/Icons/controls.png</normaloff>:/Icons/controls.png</iconset>
+     <normaloff>:/Icons/controllers.png</normaloff>:/Icons/controllers.png</iconset>
    </property>
    <property name="text">
-    <string>Controls</string>
-   </property>
-   <property name="iconText">
-    <string>Controls</string>
+    <string>Pads</string>
    </property>
    <property name="toolTip">
     <string>Configure controls</string>
-   </property>
-  </action>
-  <action name="toolbar_snap">
-   <property name="enabled">
-    <bool>false</bool>
-   </property>
-   <property name="icon">
-    <iconset resource="../resources.qrc">
-     <normaloff>:/Icons/screenshot.png</normaloff>:/Icons/screenshot.png</iconset>
-   </property>
-   <property name="text">
-    <string>snap</string>
-   </property>
-   <property name="toolTip">
-    <string>Capture frame</string>
-   </property>
-   <property name="visible">
-    <bool>false</bool>
-   </property>
-   <property name="iconVisibleInMenu">
-    <bool>true</bool>
    </property>
   </action>
   <action name="toolbar_fullscreen">
@@ -849,7 +866,7 @@
      <normaloff>:/Icons/fullscreen.png</normaloff>:/Icons/fullscreen.png</iconset>
    </property>
    <property name="text">
-    <string>fullscreen</string>
+    <string>FullScr</string>
    </property>
    <property name="toolTip">
     <string>Toggle fullscreen</string>
@@ -861,7 +878,7 @@
      <normaloff>:/Icons/list.png</normaloff>:/Icons/list.png</iconset>
    </property>
    <property name="text">
-    <string>list</string>
+    <string>List</string>
    </property>
    <property name="toolTip">
     <string>Switch to list mode</string>
@@ -873,31 +890,10 @@
      <normaloff>:/Icons/grid.png</normaloff>:/Icons/grid.png</iconset>
    </property>
    <property name="text">
-    <string>grid</string>
+    <string>Grid</string>
    </property>
    <property name="toolTip">
     <string>Switch to grid mode</string>
-   </property>
-  </action>
-  <action name="toolbar_sort">
-   <property name="enabled">
-    <bool>false</bool>
-   </property>
-   <property name="icon">
-    <iconset resource="../resources.qrc">
-     <normaloff>:/Icons/sort.png</normaloff>:/Icons/sort.png</iconset>
-   </property>
-   <property name="text">
-    <string>sort</string>
-   </property>
-   <property name="toolTip">
-    <string>Sort options</string>
-   </property>
-   <property name="visible">
-    <bool>false</bool>
-   </property>
-   <property name="iconVisibleInMenu">
-    <bool>true</bool>
    </property>
   </action>
   <action name="toolbar_refresh">
@@ -906,19 +902,19 @@
      <normaloff>:/Icons/refresh.png</normaloff>:/Icons/refresh.png</iconset>
    </property>
    <property name="text">
-    <string>refresh</string>
+    <string>Refresh</string>
    </property>
    <property name="toolTip">
     <string>Refresh gamelist</string>
    </property>
   </action>
-  <action name="toolbar_disc">
+  <action name="toolbar_open">
    <property name="icon">
     <iconset resource="../resources.qrc">
-     <normaloff>:/Icons/disc.png</normaloff>:/Icons/disc.png</iconset>
+     <normaloff>:/Icons/open.png</normaloff>:/Icons/open.png</iconset>
    </property>
    <property name="text">
-    <string>disc</string>
+    <string>Open</string>
    </property>
    <property name="toolTip">
     <string>Boot game</string>
@@ -949,6 +945,24 @@
    </property>
    <property name="text">
     <string>Show Hidden Entries</string>
+   </property>
+  </action>
+  <action name="actionopen_rsx_capture">
+   <property name="text">
+    <string>Open RSX Capture</string>
+   </property>
+  </action>
+  <action name="addGamesAct">
+   <property name="text">
+    <string>Add Games</string>
+   </property>
+  </action>
+  <action name="showTitleBarsAct">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Show Title Bars</string>
    </property>
   </action>
  </widget>

@@ -26,6 +26,14 @@
 #include <array>
 #include <vector>
 
+enum class i2 : char
+{
+};
+
+enum class i4 : char
+{
+};
+
 template <typename T = void>
 struct llvm_value_t
 {
@@ -69,11 +77,43 @@ struct llvm_value_t<bool> : llvm_value_t<void>
 	using base::base;
 
 	static constexpr uint esize  = 1;
-	static constexpr uint is_int = true;
+	static constexpr bool is_int = true;
 
 	static llvm::Type* get_type(llvm::LLVMContext& context)
 	{
 		return llvm::Type::getInt1Ty(context);
+	}
+};
+
+template <>
+struct llvm_value_t<i2> : llvm_value_t<void>
+{
+	using type = i2;
+	using base = llvm_value_t<void>;
+	using base::base;
+
+	static constexpr uint esize  = 2;
+	static constexpr bool is_int = true;
+
+	static llvm::Type* get_type(llvm::LLVMContext& context)
+	{
+		return llvm::Type::getIntNTy(context, 2);
+	}
+};
+
+template <>
+struct llvm_value_t<i4> : llvm_value_t<void>
+{
+	using type = i4;
+	using base = llvm_value_t<void>;
+	using base::base;
+
+	static constexpr uint esize  = 4;
+	static constexpr bool is_int = true;
+
+	static llvm::Type* get_type(llvm::LLVMContext& context)
+	{
+		return llvm::Type::getIntNTy(context, 4);
 	}
 };
 
@@ -312,10 +352,32 @@ struct llvm_add_t
 	}
 };
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_add_t<typename T1::type, T1, T2> operator +(T1 a1, T2 a2)
 {
 	return {a1, a2};
+}
+
+template <typename T, typename A1>
+struct llvm_add_const_t
+{
+	using type = T;
+
+	A1 a1;
+	u64 c;
+
+	static_assert(llvm_value_t<T>::is_sint || llvm_value_t<T>::is_uint, "llvm_add_const_t<>: invalid type");
+
+	llvm::Value* eval(llvm::IRBuilder<>* ir) const
+	{
+		return ir->CreateAdd(a1.eval(ir), llvm::ConstantInt::get(llvm_value_t<T>::get_type(ir->getContext()), c, llvm_value_t<T>::is_sint));
+	}
+};
+
+template <typename T1, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<llvm_value_t<typename T1::type>::is_int>>
+inline llvm_add_const_t<typename T1::type, T1> operator +(T1 a1, u64 c)
+{
+	return {a1, c};
 }
 
 template <typename T, typename A1, typename A2>
@@ -345,10 +407,54 @@ struct llvm_sub_t
 	}
 };
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_sub_t<typename T1::type, T1, T2> operator -(T1 a1, T2 a2)
 {
 	return {a1, a2};
+}
+
+template <typename T, typename A1>
+struct llvm_sub_const_t
+{
+	using type = T;
+
+	A1 a1;
+	u64 c;
+
+	static_assert(llvm_value_t<T>::is_sint || llvm_value_t<T>::is_uint, "llvm_sub_const_t<>: invalid type");
+
+	llvm::Value* eval(llvm::IRBuilder<>* ir) const
+	{
+		return ir->CreateSub(a1.eval(ir), llvm::ConstantInt::get(llvm_value_t<T>::get_type(ir->getContext()), c, llvm_value_t<T>::is_sint));
+	}
+};
+
+template <typename T1, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<llvm_value_t<typename T1::type>::is_int>>
+inline llvm_sub_const_t<typename T1::type, T1> operator -(T1 a1, u64 c)
+{
+	return {a1, c};
+}
+
+template <typename T, typename A1>
+struct llvm_const_sub_t
+{
+	using type = T;
+
+	A1 a1;
+	u64 c;
+
+	static_assert(llvm_value_t<T>::is_sint || llvm_value_t<T>::is_uint, "llvm_const_sub_t<>: invalid type");
+
+	llvm::Value* eval(llvm::IRBuilder<>* ir) const
+	{
+		return ir->CreateSub(llvm::ConstantInt::get(llvm_value_t<T>::get_type(ir->getContext()), c, llvm_value_t<T>::is_sint), a1.eval(ir));
+	}
+};
+
+template <typename T1, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<llvm_value_t<typename T1::type>::is_int>>
+inline llvm_const_sub_t<typename T1::type, T1> operator -(u64 c, T1 a1)
+{
+	return {a1, c};
 }
 
 template <typename T, typename A1, typename A2>
@@ -378,7 +484,7 @@ struct llvm_mul_t
 	}
 };
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_mul_t<typename T1::type, T1, T2> operator *(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -416,7 +522,7 @@ struct llvm_div_t
 	}
 };
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_div_t<typename T1::type, T1, T2> operator /(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -447,7 +553,7 @@ struct llvm_neg_t
 	}
 };
 
-template <typename T1, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<llvm_value_t<typename T1::type>::esize>>
+template <typename T1, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<(llvm_value_t<typename T1::type>::esize > 1)>>
 inline llvm_neg_t<typename T1::type, T1> operator -(T1 a1)
 {
 	return {a1};
@@ -491,7 +597,7 @@ struct llvm_shl_t
 	}
 };
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_shl_t<typename T1::type, T1, T2> operator <<(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -530,7 +636,7 @@ struct llvm_shr_t
 	}
 };
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_shr_t<typename T1::type, T1, T2> operator >>(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -564,7 +670,7 @@ struct llvm_and_t
 	}
 };
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_and_t<typename T1::type, T1, T2> operator &(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -598,7 +704,7 @@ struct llvm_or_t
 	}
 };
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_or_t<typename T1::type, T1, T2> operator |(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -632,7 +738,7 @@ struct llvm_xor_t
 	}
 };
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_xor_t<typename T1::type, T1, T2> operator ^(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -673,7 +779,7 @@ inline llvm_not_t<typename T1::type, T1> operator ~(T1 a1)
 template <typename T, typename A1, typename A2, llvm::CmpInst::Predicate UPred>
 struct llvm_icmp_t
 {
-	using type = std::conditional_t<llvm_value_t<T>::is_vector, bool[llvm_value_t<T>::is_vector], bool>;
+	using type = std::conditional_t<llvm_value_t<T>::is_vector != 0, bool[llvm_value_t<T>::is_vector], bool>;
 
 	A1 a1;
 	A2 a2;
@@ -686,6 +792,8 @@ struct llvm_icmp_t
 		UPred == llvm::ICmpInst::ICMP_UGE ? llvm::ICmpInst::ICMP_SGE :
 		UPred == llvm::ICmpInst::ICMP_ULT ? llvm::ICmpInst::ICMP_SLT :
 		UPred == llvm::ICmpInst::ICMP_ULE ? llvm::ICmpInst::ICMP_SLE : UPred;
+
+	static_assert(llvm_value_t<T>::is_sint || llvm_value_t<T>::is_uint || UPred == llvm::ICmpInst::ICMP_EQ || UPred == llvm::ICmpInst::ICMP_NE, "llvm_eq_t<>: invalid type(II)");
 
 	static inline llvm::Value* icmp(llvm::IRBuilder<>* ir, llvm::Value* lhs, llvm::Value* rhs)
 	{
@@ -709,7 +817,7 @@ struct llvm_icmp_t
 	}
 };
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_icmp_t<typename T1::type, T1, T2, llvm::ICmpInst::ICMP_EQ> operator ==(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -721,7 +829,7 @@ inline llvm_icmp_t<typename T1::type, T1, llvm_int_t, llvm::ICmpInst::ICMP_EQ> o
 	return {a1, llvm_int_t{a2}};
 }
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_icmp_t<typename T1::type, T1, T2, llvm::ICmpInst::ICMP_NE> operator !=(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -733,7 +841,7 @@ inline llvm_icmp_t<typename T1::type, T1, llvm_int_t, llvm::ICmpInst::ICMP_NE> o
 	return {a1, llvm_int_t{a2}};
 }
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_icmp_t<typename T1::type, T1, T2, llvm::ICmpInst::ICMP_UGT> operator >(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -745,7 +853,7 @@ inline llvm_icmp_t<typename T1::type, T1, llvm_int_t, llvm::ICmpInst::ICMP_UGT> 
 	return {a1, llvm_int_t{a2}};
 }
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_icmp_t<typename T1::type, T1, T2, llvm::ICmpInst::ICMP_UGE> operator >=(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -757,7 +865,7 @@ inline llvm_icmp_t<typename T1::type, T1, llvm_int_t, llvm::ICmpInst::ICMP_UGE> 
 	return {a1, llvm_int_t{a2}};
 }
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_icmp_t<typename T1::type, T1, T2, llvm::ICmpInst::ICMP_ULT> operator <(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -769,7 +877,7 @@ inline llvm_icmp_t<typename T1::type, T1, llvm_int_t, llvm::ICmpInst::ICMP_ULT> 
 	return {a1, llvm_int_t{a2}};
 }
 
-template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
+template <typename T1, typename T2, typename = decltype(std::declval<T1>().eval(0)), typename = decltype(std::declval<T2>().eval(0)), typename = std::enable_if_t<std::is_same<typename T1::type, typename T2::type>::value>>
 inline llvm_icmp_t<typename T1::type, T1, T2, llvm::ICmpInst::ICMP_ULE> operator <=(T1 a1, T2 a2)
 {
 	return {a1, a2};
@@ -784,16 +892,19 @@ inline llvm_icmp_t<typename T1::type, T1, llvm_int_t, llvm::ICmpInst::ICMP_ULE> 
 class cpu_translator
 {
 protected:
-	cpu_translator(llvm::LLVMContext& context, llvm::Module* module, bool is_be);
+	cpu_translator(llvm::Module* module, bool is_be);
 
 	// LLVM context
-	llvm::LLVMContext& m_context;
+	std::reference_wrapper<llvm::LLVMContext> m_context;
 
 	// Module to which all generated code is output to
-	llvm::Module* const m_module;
+	llvm::Module* m_module;
 
 	// Endianness, affects vector element numbering (TODO)
-	const bool m_is_be;
+	bool m_is_be;
+
+	// Allow PSHUFB intrinsic
+	bool m_use_ssse3;
 
 	// IR builder
 	llvm::IRBuilder<>* m_ir;
@@ -814,6 +925,19 @@ public:
 
 	template <typename T>
 	using value_t = llvm_value_t<T>;
+
+	template <typename T>
+	value_t<T> value(llvm::Value* value)
+	{
+		if (!value || value->getType() != get_type<T>())
+		{
+			fmt::throw_exception("cpu_translator::value<>(): invalid value type");
+		}
+
+		value_t<T> result;
+		result.value = value;
+		return result;
+	}
 
 	template <typename T>
 	auto eval(T expr)
@@ -855,13 +979,6 @@ public:
 		return result;
 	}
 
-	// Get unsigned addition carry into the sign bit (s = a + b)
-	template <typename T>
-	static inline auto ucarry(T a, T b, T s)
-	{
-		return ((a ^ b) & ~s) | (a & b);
-	}
-
 	// Get signed addition overflow into the sign bit (s = a + b)
 	template <typename T>
 	static inline auto scarry(T a, T b, T s)
@@ -883,12 +1000,268 @@ public:
 		return (a & c) | (b & ~c);
 	}
 
+	// Rotate left
+	template <typename T>
+	static inline auto rol(T a, T b)
+	{
+		static constexpr u64 mask = value_t<typename T::type>::esize - 1;
+		return a << (b & mask) | a >> (-b & mask);
+	}
+
+	// Rotate left
+	template <typename T>
+	static inline auto rol(T a, u64 b)
+	{
+		static constexpr u64 mask = value_t<typename T::type>::esize - 1;
+		return a << (b & mask) | a >> ((0 - b) & mask);
+	}
+
 	// Average: (a + b + 1) >> 1
 	template <typename T>
-	static inline auto avg(T a, T b)
+	inline auto avg(T a, T b)
 	{
-		return (a >> 1) + (b >> 1) + ((a | b) & 1);
+		//return (a >> 1) + (b >> 1) + ((a | b) & 1);
+
+		value_t<typename T::type> result;
+		llvm::Instruction::CastOps cast_op = llvm::Instruction::BitCast;
+		if (result.is_sint)
+			cast_op = llvm::Instruction::SExt;
+		if (result.is_uint)
+			cast_op = llvm::Instruction::ZExt;
+		llvm::Type* cast_t = m_ir->getIntNTy(result.esize * 2);
+		if (result.is_vector != 0)
+			cast_t = llvm::VectorType::get(cast_t, result.is_vector);
+
+		const auto axt = m_ir->CreateCast(cast_op, a.eval(m_ir), cast_t);
+		const auto bxt = m_ir->CreateCast(cast_op, b.eval(m_ir), cast_t);
+		const auto cxt = llvm::ConstantInt::get(cast_t, 1, false);
+		const auto abc = m_ir->CreateAdd(m_ir->CreateAdd(axt, bxt), cxt);
+		result.value = m_ir->CreateTrunc(m_ir->CreateLShr(abc, 1), result.get_type(m_context));
+		return result;
 	}
+
+	// Select (c ? a : b)
+	template <typename T, typename T2>
+	auto select(T2 c, T a, T b)
+	{
+		static_assert(value_t<typename T2::type>::esize == 1, "select: expected bool type (first argument)");
+		static_assert(value_t<typename T2::type>::is_vector == value_t<typename T::type>::is_vector, "select: incompatible arguments (vectors)");
+		T result;
+		result.value = m_ir->CreateSelect(c.eval(m_ir), a.eval(m_ir), b.eval(m_ir));
+		return result;
+	}
+
+	template <typename T, typename E>
+	auto insert(T v, u64 i, E e)
+	{
+		value_t<typename T::type> result;
+		result.value = m_ir->CreateInsertElement(v.eval(m_ir), e.eval(m_ir), i);
+		return result;
+	}
+
+	template <typename T>
+	auto extract(T v, u64 i)
+	{
+		typename value_t<typename T::type>::base result;
+		result.value = m_ir->CreateExtractElement(v.eval(m_ir), i);
+		return result;
+	}
+
+	template <typename T>
+	auto splat(u64 c)
+	{
+		value_t<T> result;
+		result.value = llvm::ConstantInt::get(result.get_type(m_context), c, result.is_sint);
+		return result;
+	}
+
+	template <typename T>
+	auto fsplat(f64 c)
+	{
+		value_t<T> result;
+		result.value = llvm::ConstantFP::get(result.get_type(m_context), c);
+		return result;
+	}
+
+	// Min
+	template <typename T>
+	auto min(T a, T b)
+	{
+		T result;
+		result.value = m_ir->CreateSelect((a > b).eval(m_ir), b.eval(m_ir), a.eval(m_ir));
+		return result;
+	}
+
+	// Max
+	template <typename T>
+	auto max(T a, T b)
+	{
+		T result;
+		result.value = m_ir->CreateSelect((a > b).eval(m_ir), a.eval(m_ir), b.eval(m_ir));
+		return result;
+	}
+
+	// Shuffle single vector using all zeros second vector of the same size
+	template <typename T, typename T1, typename... Args>
+	auto zshuffle(T1 a, Args... args)
+	{
+		static_assert(sizeof(T) / sizeof(std::remove_extent_t<T>) == sizeof...(Args), "zshuffle: unexpected result type");
+		const u32 values[]{static_cast<u32>(args)...};
+		value_t<T> result;
+		result.value = a.eval(m_ir);
+		result.value = m_ir->CreateShuffleVector(result.value, llvm::ConstantInt::get(result.value->getType(), 0), values);
+		return result;
+	}
+
+	template <typename T, typename T1, typename T2, typename... Args>
+	auto shuffle2(T1 a, T2 b, Args... args)
+	{
+		static_assert(sizeof(T) / sizeof(std::remove_extent_t<T>) == sizeof...(Args), "shuffle2: unexpected result type");
+		const u32 values[]{static_cast<u32>(args)...};
+		value_t<T> result;
+		result.value = a.eval(m_ir);
+		result.value = m_ir->CreateShuffleVector(result.value, b.eval(m_ir), values);
+		return result;
+	}
+
+	template <typename T, typename... Args>
+	auto build(Args... args)
+	{
+		using value_type = std::remove_extent_t<T>;
+		const value_type values[]{static_cast<value_type>(args)...};
+		static_assert(sizeof(T) / sizeof(value_type) == sizeof...(Args), "build: unexpected number of arguments");
+		value_t<T> result;
+		result.value = llvm::ConstantDataVector::get(m_context, values);
+		return result;
+	}
+
+	template <typename... Types>
+	llvm::Function* get_intrinsic(llvm::Intrinsic::ID id)
+	{
+		const auto module = m_ir->GetInsertBlock()->getParent()->getParent();
+		return llvm::Intrinsic::getDeclaration(module, id, {get_type<Types>()...});
+	}
+
+	template <typename T>
+	auto ctlz(T a)
+	{
+		value_t<typename T::type> result;
+		result.value = m_ir->CreateCall(get_intrinsic<typename T::type>(llvm::Intrinsic::ctlz), {a.eval(m_ir), m_ir->getFalse()});
+		return result;
+	}
+
+	template <typename T>
+	auto ctpop(T a)
+	{
+		value_t<typename T::type> result;
+		result.value = m_ir->CreateCall(get_intrinsic<typename T::type>(llvm::Intrinsic::ctpop), {a.eval(m_ir)});
+		return result;
+	}
+
+	template <typename T>
+	auto sqrt(T a)
+	{
+		value_t<typename T::type> result;
+		result.value = m_ir->CreateCall(get_intrinsic<typename T::type>(llvm::Intrinsic::sqrt), {a.eval(m_ir)});
+		return result;
+	}
+
+	template <typename T>
+	auto fabs(T a)
+	{
+		value_t<typename T::type> result;
+		result.value = m_ir->CreateCall(get_intrinsic<typename T::type>(llvm::Intrinsic::fabs), {a.eval(m_ir)});
+		return result;
+	}
+
+	template <llvm::CmpInst::Predicate FPred, typename T>
+	auto fcmp(T a, T b)
+	{
+		value_t<std::conditional_t<llvm_value_t<typename T::type>::is_vector != 0, bool[llvm_value_t<typename T::type>::is_vector], bool>> result;
+		result.value = m_ir->CreateFCmp(FPred, a.eval(m_ir), b.eval(m_ir));
+		return result;
+	}
+
+	// Opportunistic hardware FMA, can be used if results are identical for all possible input values
+	template <typename T>
+	auto fmuladd(T a, T b, T c)
+	{
+		value_t<typename T::type> result;
+		const auto av = a.eval(m_ir);
+		const auto bv = b.eval(m_ir);
+		const auto cv = c.eval(m_ir);
+		result.value = m_ir->CreateCall(get_intrinsic<typename T::type>(llvm::Intrinsic::fmuladd), {av, bv, cv});
+		return result;
+	}
+
+	template <typename T1, typename T2>
+	value_t<u8[16]> pshufb(T1 a, T2 b)
+	{
+		value_t<u8[16]> result;
+
+		const auto data0 = a.eval(m_ir);
+		const auto index = b.eval(m_ir);
+		const auto zeros = llvm::ConstantAggregateZero::get(get_type<u8[16]>());
+
+		if (auto c = llvm::dyn_cast<llvm::Constant>(index))
+		{
+			// Convert PSHUFB index back to LLVM vector shuffle mask
+			v128 mask{};
+
+			const auto cv = llvm::dyn_cast<llvm::ConstantDataVector>(c);
+
+			if (cv)
+			{
+				for (u32 i = 0; i < 16; i++)
+				{
+					const u64 b = cv->getElementAsInteger(i);
+					mask._u8[i] = b < 128 ? b % 16 : 16;
+				}
+			}
+
+			if (cv || llvm::isa<llvm::ConstantAggregateZero>(c))
+			{
+				result.value = llvm::ConstantDataVector::get(m_context, llvm::makeArrayRef((const u8*)mask._bytes, 16));
+				result.value = m_ir->CreateZExt(result.value, get_type<u32[16]>());
+				result.value = m_ir->CreateShuffleVector(data0, zeros, result.value);
+				return result;
+			}
+		}
+
+		if (m_use_ssse3)
+		{
+			result.value = m_ir->CreateCall(get_intrinsic(llvm::Intrinsic::x86_ssse3_pshuf_b_128), {data0, index});
+		}
+		else
+		{
+			// Emulate PSHUFB (TODO)
+			const auto mask = m_ir->CreateAnd(index, 0xf);
+			const auto loop = llvm::BasicBlock::Create(m_context, "", m_ir->GetInsertBlock()->getParent());
+			const auto next = llvm::BasicBlock::Create(m_context, "", m_ir->GetInsertBlock()->getParent());
+			const auto prev = m_ir->GetInsertBlock();
+
+			m_ir->CreateBr(loop);
+			m_ir->SetInsertPoint(loop);
+			const auto i = m_ir->CreatePHI(get_type<u32>(), 2);
+			const auto v = m_ir->CreatePHI(get_type<u8[16]>(), 2);
+			i->addIncoming(m_ir->getInt32(0), prev);
+			i->addIncoming(m_ir->CreateAdd(i, m_ir->getInt32(1)), loop);
+			v->addIncoming(zeros, prev);
+			result.value = m_ir->CreateInsertElement(v, m_ir->CreateExtractElement(data0, m_ir->CreateExtractElement(mask, i)), i);
+			v->addIncoming(result.value, loop);
+			m_ir->CreateCondBr(m_ir->CreateICmpULT(i, m_ir->getInt32(16)), loop, next);
+			m_ir->SetInsertPoint(next);
+			result.value = m_ir->CreateSelect(m_ir->CreateICmpSLT(index, zeros), zeros, result.value);
+		}
+
+		return result;
+	}
+
+	template <typename R = v128>
+	R get_const_vector(llvm::Constant*, u32 a, u32 b);
+
+	template <typename T = v128>
+	llvm::Constant* make_const_vector(T, llvm::Type*);
 };
 
 #endif
