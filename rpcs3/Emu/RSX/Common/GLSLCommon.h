@@ -606,67 +606,6 @@ namespace glsl
 			"#define TEX3D_PROJ(index, coord4) process_texel(textureProj(TEX_NAME(index), coord4), floatBitsToUint(texture_parameters[index].w))\n\n";
 		}
 
-		if (require_texture_ops)
-		{
-			OS << "vec4 linear_to_srgb(vec4 cl)\n";
-			OS << "{\n";
-			OS << "	vec4 low = cl * 12.92;\n";
-			OS << "	vec4 high = 1.055 * pow(cl, vec4(1. / 2.4)) - 0.055;\n";
-			OS << "	bvec4 select = lessThan(cl, vec4(0.0031308));\n";
-			OS << "	return clamp(mix(high, low, select), 0., 1.);\n";
-			OS << "}\n\n";
-
-			OS << "float srgb_to_linear(float cs)\n";
-			OS << "{\n";
-			OS << "	if (cs <= 0.04045) return cs / 12.92;\n";
-			OS << "	return pow((cs + 0.055) / 1.055, 2.4);\n";
-			OS << "}\n\n";
-
-			//TODO: Move all the texture read control operations here
-			OS << "vec4 process_texel(vec4 rgba, uint control_bits)\n";
-			OS << "{\n";
-			OS << "	if (control_bits == 0) return rgba;\n\n";
-			OS << "	if ((control_bits & 0x10) > 0)\n";
-			OS << "	{\n";
-			OS << "		//Alphakill\n";
-			OS << "		if (!comparison_passes(rgba.a, 0., (control_bits >> 5) & 0x7))\n";
-			OS << "		{\n";
-			OS << "			discard;\n";
-			OS << "			return rgba;\n";
-			OS << "		}\n";
-			OS << "	}\n\n";
-			OS << "	//TODO: Verify gamma control bit ordering, looks to be 0x7 for rgb, 0xF for rgba\n";
-			OS << "	uint srgb_in = (control_bits & 0xF);\n";
-			OS << "	if ((srgb_in & 0x1) > 0) rgba.r = srgb_to_linear(rgba.r);\n";
-			OS << "	if ((srgb_in & 0x2) > 0) rgba.g = srgb_to_linear(rgba.g);\n";
-			OS << "	if ((srgb_in & 0x4) > 0) rgba.b = srgb_to_linear(rgba.b);\n";
-			OS << "	if ((srgb_in & 0x8) > 0) rgba.a = srgb_to_linear(rgba.a);\n";
-			OS << "	return rgba;\n";
-			OS << "}\n\n";
-
-			OS << "#define TEX1D(index, tex, coord1) process_texel(texture(tex, coord1 * texture_parameters[index].x), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX1D_BIAS(index, tex, coord1, bias) process_texel(texture(tex, coord1 * texture_parameters[index].x, bias), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX1D_LOD(index, tex, coord1, lod) process_texel(textureLod(tex, coord1 * texture_parameters[index].x, lod), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX1D_GRAD(index, tex, coord1, dpdx, dpdy) process_texel(textureGrad(tex, coord1 * texture_parameters[index].x, dpdx, dpdy), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX1D_PROJ(index, tex, coord2) process_texel(textureGrad(tex, coord2 * vec2(texture_parameters[index].x, 1.)), uint(texture_parameters[index].w))\n";
-
-			OS << "#define TEX2D(index, tex, coord2) process_texel(texture(tex, coord2 * texture_parameters[index].xy), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX2D_BIAS(index, tex, coord2, bias) process_texel(texture(tex, coord2 * texture_parameters[index].xy, bias), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX2D_LOD(index, tex, coord2, lod) process_texel(textureLod(tex, coord2 * texture_parameters[index].xy, lod), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX2D_GRAD(index, tex, coord2, dpdx, dpdy) process_texel(textureGrad(tex, coord2 * texture_parameters[index].xy, dpdx, dpdy), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX2D_PROJ(index, tex, coord4) process_texel(textureProj(tex, coord4 * vec4(texture_parameters[index].xy, 1., 1.)), uint(texture_parameters[index].w))\n";
-
-			OS << "#define TEX2D_DEPTH_RGBA8(index, tex, coord2) process_texel(texture2DReconstruct(tex, coord2 * texture_parameters[index].xy, texture_parameters[index].z), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX2D_SHADOW(index, tex, coord3) texture(tex, coord3 * vec3(texture_parameters[index].xy, 1.))\n";
-			OS << "#define TEX2D_SHADOWPROJ(index, tex, coord4) textureProj(tex, coord4 * vec4(texture_parameters[index].xy, 1., 1.))\n";
-
-			OS << "#define TEX3D(index, tex, coord3) process_texel(texture(tex, coord3), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX3D_BIAS(index, tex, coord3, bias) process_texel(texture(tex, coord3, bias), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX3D_LOD(index, tex, coord3, lod) process_texel(textureLod(tex, coord3, lod), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX3D_GRAD(index, tex, coord3, dpdx, dpdy) process_texel(textureGrad(tex, coord3, dpdx, dpdy), uint(texture_parameters[index].w))\n";
-			OS << "#define TEX3D_PROJ(index, tex, coord4) process_texel(textureProj(tex, coord4), uint(texture_parameters[index].w))\n\n";
-		}
-
 		if (require_wpos)
 		{
 			OS <<

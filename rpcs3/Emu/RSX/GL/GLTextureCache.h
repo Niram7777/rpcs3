@@ -688,23 +688,6 @@ namespace gl
 			{
 				swizzle = src->get_native_component_layout();
 			}
-			else
-			{
-				//Inherit the parent's default mapping. The caller should ensure the native order is set beforehand
-				GLint src_remap[4];
-				glBindTexture(GL_TEXTURE_2D, src_id);
-				glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, (GLint*)&src_remap[0]);
-				glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, (GLint*)&src_remap[1]);
-				glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, (GLint*)&src_remap[2]);
-				glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, (GLint*)&src_remap[3]);
-
-				glBindTexture(dst_type, dst_id);
-				glTexParameteriv(dst_type, GL_TEXTURE_SWIZZLE_RGBA, src_remap);
-			}
-
-			if (memcmp(remap.first.data(), rsx::default_remap_vector.first.data(), 4) ||
-				memcmp(remap.second.data(), rsx::default_remap_vector.second.data(), 4))
-				set_up_remap_vector(dst_id, dst_type, remap);
 
 			if (memcmp(remap.first.data(), rsx::default_remap_vector.first.data(), 4) ||
 				memcmp(remap.second.data(), rsx::default_remap_vector.second.data(), 4))
@@ -774,18 +757,6 @@ namespace gl
 						src_rect, dst_rect, false, false, {});
 				}
 			}
-		}
-
-		void set_up_remap_vector(u32 texture_id, GLenum texture_type, const texture_channel_remap_t& remap_vector)
-		{
-			std::array<GLenum, 4> swizzle_remap;
-			glBindTexture(texture_type, texture_id);
-			glGetTexParameteriv(texture_type, GL_TEXTURE_SWIZZLE_A, (GLint*)&swizzle_remap[0]);
-			glGetTexParameteriv(texture_type, GL_TEXTURE_SWIZZLE_R, (GLint*)&swizzle_remap[1]);
-			glGetTexParameteriv(texture_type, GL_TEXTURE_SWIZZLE_G, (GLint*)&swizzle_remap[2]);
-			glGetTexParameteriv(texture_type, GL_TEXTURE_SWIZZLE_B, (GLint*)&swizzle_remap[3]);
-
-			apply_swizzle_remap(texture_type, swizzle_remap, remap_vector);
 		}
 
 	protected:

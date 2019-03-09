@@ -634,10 +634,6 @@ namespace vk
 				memcmp(remap_vector.second.data(), rsx::default_remap_vector.second.data(), 4))
 				view_swizzle = vk::apply_swizzle_remap({view_swizzle.a, view_swizzle.r, view_swizzle.g, view_swizzle.b}, remap_vector);
 
-			if (memcmp(remap_vector.first.data(), rsx::default_remap_vector.first.data(), 4) ||
-				memcmp(remap_vector.second.data(), rsx::default_remap_vector.second.data(), 4))
-				view_swizzle = vk::apply_swizzle_remap({view_swizzle.a, view_swizzle.r, view_swizzle.g, view_swizzle.b}, remap_vector);
-
 			VkImageSubresourceRange view_range = { aspect & ~(VK_IMAGE_ASPECT_STENCIL_BIT), 0, 1, 0, 1 };
 			view.reset(new vk::image_view(*vk::get_current_renderer(), image.get(), view_swizzle, view_range));
 
@@ -1081,7 +1077,7 @@ namespace vk
 			return upload_texture(cmd, tex, m_rtts, const_cast<const VkQueue>(m_submit_queue));
 		}
 
-		vk::image *upload_image_simple(vk::command_buffer& /*cmd*/, u32 address, u32 width, u32 height)
+		vk::image *upload_image_simple(vk::command_buffer& cmd, u32 address, u32 width, u32 height)
 		{
 			if (!m_formats_support.bgra8_linear)
 			{

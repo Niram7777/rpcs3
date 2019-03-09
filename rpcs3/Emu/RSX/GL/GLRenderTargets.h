@@ -114,14 +114,6 @@ namespace gl
 
 		u32 raw_handle() const
 		{
-			//Get view with components in true native layout
-			//TODO: Implement real image views
-			const GLenum rgba_remap[4] = { GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA };
-			glBindTexture(GL_TEXTURE_2D, id());
-			glTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_RGBA, (GLint*)rgba_remap);
-
-			//Reset view encoding
-			current_remap_encoding = 0;
 			return id();
 		}
 
@@ -131,12 +123,6 @@ namespace gl
 			internal_height = height();
 			surface_width = rsx::apply_inverse_resolution_scale(internal_width, true);
 			surface_height = rsx::apply_inverse_resolution_scale(internal_height, true);
-
-			bind();
-			glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, (GLint*)&native_component_mapping[0]);
-			glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, (GLint*)&native_component_mapping[1]);
-			glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, (GLint*)&native_component_mapping[2]);
-			glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, (GLint*)&native_component_mapping[3]);
 		}
 
 		bool matches_dimensions(u16 _width, u16 _height) const

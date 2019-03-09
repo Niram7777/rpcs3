@@ -605,7 +605,7 @@ namespace gl
 
 		//The rest of sampler state is now handled by sampler state objects
 		const auto format_type = get_format_type(gcm_format);
-		const GLenum gl_format = (colorspace == rsx::texture_colorspace::rgb_linear)? std::get<0>(format_type) : get_srgb_format(std::get<0>(format_type));
+		const GLenum gl_format = std::get<0>(format_type);
 		const GLenum gl_type = std::get<1>(format_type);
 		fill_texture(type, mipmaps, gcm_format, width, height, depth, subresources_layout, is_swizzled, gl_format, gl_type, data_upload_buf);
 	}

@@ -3,6 +3,7 @@
 #include "Utilities/GSL.h"
 #include "Emu/Memory/vm.h"
 #include "../GCM.h"
+#include "Emu/RSX/rsx_utils.h"
 #include <list>
 
 namespace
