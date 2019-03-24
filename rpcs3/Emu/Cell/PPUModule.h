@@ -177,6 +177,7 @@ public:
 	static const ppu_static_module cellCrossController;
 	static const ppu_static_module cellDaisy;
 	static const ppu_static_module cellDmux;
+	static const ppu_static_module cellDtcpIpUtility;
 	static const ppu_static_module cellFiber;
 	static const ppu_static_module cellFont;
 	static const ppu_static_module cellFontFT;
@@ -200,10 +201,12 @@ public:
 	static const ppu_static_module cellMusic;
 	static const ppu_static_module cellMusicDecode;
 	static const ppu_static_module cellMusicExport;
+	static const ppu_static_module cellNetAoi;
 	static const ppu_static_module cellNetCtl;
 	static const ppu_static_module cellOskDialog;
 	static const ppu_static_module cellOvis;
 	static const ppu_static_module cellPamf;
+	static const ppu_static_module cellPesmUtility;
 	static const ppu_static_module cellPhotoDecode;
 	static const ppu_static_module cellPhotoExport;
 	static const ppu_static_module cellPhotoImportUtil;
@@ -243,6 +246,7 @@ public:
 	static const ppu_static_module cellUserInfo;
 	static const ppu_static_module cellVdec;
 	static const ppu_static_module cellVideoExport;
+	static const ppu_static_module cellVideoPlayerUtility;
 	static const ppu_static_module cellVideoUpload;
 	static const ppu_static_module cellVoice;
 	static const ppu_static_module cellVpost;
