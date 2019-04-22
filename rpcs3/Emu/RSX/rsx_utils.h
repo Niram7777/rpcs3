@@ -48,27 +48,41 @@ namespace rsx
 		u32 address = 0;
 		u32 pitch = 0;
 
-		bool is_depth_surface;
+		bool is_depth_surface = false;
 
 		rsx::surface_color_format color_format;
 		rsx::surface_depth_format depth_format;
 
-		u16 width;
-		u16 height;
+		u16 width = 0;
+		u16 height = 0;
+		u8  bpp = 0;
 
-		gcm_framebuffer_info()
-		{
-			address = 0;
-			pitch = 0;
-		}
+		address_range range{};
 
-		gcm_framebuffer_info(const u32 address_, const u32 pitch_, bool is_depth_, const rsx::surface_color_format fmt_, const rsx::surface_depth_format dfmt_, const u16 w, const u16 h)
-			:address(address_), pitch(pitch_), is_depth_surface(is_depth_), color_format(fmt_), depth_format(dfmt_), width(w), height(h)
+		gcm_framebuffer_info() {}
+
+		gcm_framebuffer_info(const u32 address_, const u32 pitch_, bool is_depth_, const rsx::surface_color_format fmt_, const rsx::surface_depth_format dfmt_, const u16 w, const u16 h, const u8 bpp_)
+			:address(address_), pitch(pitch_), is_depth_surface(is_depth_), color_format(fmt_), depth_format(dfmt_), width(w), height(h), bpp(bpp_)
 		{}
 
-		address_range get_memory_range(u32 aa_factor = 1) const
+		void calculate_memory_range(u32 aa_factor_u, u32 aa_factor_v)
 		{
-			return address_range::start_length(address, pitch * height * aa_factor);
+			// Account for the last line of the block not reaching the end
+			const u32 block_size = pitch * (height - 1) * aa_factor_v;
+			const u32 line_size = width * aa_factor_u * bpp;
+			range = address_range::start_length(address, block_size + line_size);
+		}
+
+		address_range get_memory_range(const u32* aa_factors)
+		{
+			calculate_memory_range(aa_factors[0], aa_factors[1]);
+			return range;
+		}
+
+		address_range get_memory_range() const
+		{
+			verify(HERE), range.start == address;
+			return range;
 		}
 	};
 
@@ -90,13 +104,9 @@ namespace rsx
 		u16 offset_y;
 		u16 width;
 		u16 height;
-		u16 slice_h;
 		u16 pitch;
-		void *pixels;
-
-		bool compressed_x;
-		bool compressed_y;
 		u32 rsx_address;
+		void *pixels;
 	};
 
 	struct blit_dst_info
@@ -111,16 +121,11 @@ namespace rsx
 		u16 clip_y;
 		u16 clip_width;
 		u16 clip_height;
-		u16 max_tile_h;
 		f32 scale_x;
 		f32 scale_y;
-
-		bool swizzled;
-		void *pixels;
-
-		bool compressed_x;
-		bool compressed_y;
 		u32  rsx_address;
+		void *pixels;
+		bool swizzled;
 	};
 
 	static const std::pair<std::array<u8, 4>, std::array<u8, 4>> default_remap_vector =
@@ -437,7 +442,7 @@ namespace rsx
 		}
 		else
 		{
-			const auto offset = dst_address - src_address;
+			const auto offset = src_address - dst_address;
 			const auto src_x = 0u;
 			const auto src_y = 0u;
 			const auto dst_y = (offset / pitch);
@@ -529,6 +534,32 @@ namespace rsx
 
 		std::tie(std::ignore, std::ignore, dst_w, dst_h) = clip_region<u16>(dst_w, dst_h, 0, 0, surface->width(), surface->height(), true);
 		return std::make_tuple(u16(dst_w / scale_x), u16(dst_h / scale_y), dst_w, dst_h);
+	}
+
+	template <typename SurfaceType>
+	inline bool pitch_compatible(SurfaceType* a, SurfaceType* b)
+	{
+		if (a->get_surface_height() == 1 || b->get_surface_height() == 1)
+			return true;
+
+		return (a->get_rsx_pitch() == b->get_rsx_pitch());
+	}
+
+	template <bool __is_surface = true, typename SurfaceType>
+	inline bool pitch_compatible(SurfaceType* surface, u16 pitch_required, u16 height_required)
+	{
+		if constexpr (__is_surface)
+		{
+			if (height_required == 1 || surface->get_surface_height() == 1)
+				return true;
+		}
+		else
+		{
+			if (height_required == 1 || surface->get_height() == 1)
+				return true;
+		}
+
+		return (surface->get_rsx_pitch() == pitch_required);
 	}
 
 	/**

@@ -216,7 +216,7 @@ void GLGSRender::end()
 	// Handle special memory barrier for ARGB8->D24S8 in an active DSV
 	if (ds && ds->old_contents != nullptr &&
 		ds->old_contents->get_internal_format() == gl::texture::internal_format::rgba8 &&
-		ds->get_rsx_pitch() == static_cast<gl::render_target*>(ds->old_contents)->get_rsx_pitch())
+		rsx::pitch_compatible(ds, static_cast<gl::render_target*>(ds->old_contents)))
 	{
 		gl_state.enable(GL_FALSE, GL_SCISSOR_TEST);
 
@@ -330,12 +330,12 @@ void GLGSRender::end()
 			_SelectTexture(GL_FRAGMENT_TEXTURES_START + i);
 
 			gl::texture_view* view = nullptr;
-			if (rsx::method_registers.fragment_textures[i].enabled())
-			{
-				auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
-				view = sampler_state->image_handle;
+			auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
 
-				if (!view && sampler_state->external_subresource_desc.external_handle)
+			if (rsx::method_registers.fragment_textures[i].enabled() &&
+				sampler_state->validate())
+			{
+				if (view = sampler_state->image_handle; UNLIKELY(!view))
 				{
 					view = m_gl_texture_cache.create_temporary_subresource(cmd, sampler_state->external_subresource_desc);
 				}
@@ -375,13 +375,17 @@ void GLGSRender::end()
 			auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(vs_sampler_state[i].get());
 			_SelectTexture(GL_VERTEX_TEXTURES_START + i);
 
-			if (sampler_state->image_handle)
+			if (rsx::method_registers.vertex_textures[i].enabled() &&
+				sampler_state->validate())
 			{
-				sampler_state->image_handle->bind();
-			}
-			else if (sampler_state->external_subresource_desc.external_handle)
-			{
-				m_gl_texture_cache.create_temporary_subresource(cmd, sampler_state->external_subresource_desc)->bind();
+				if (LIKELY(sampler_state->image_handle))
+				{
+					sampler_state->image_handle->bind();
+				}
+				else
+				{
+					m_gl_texture_cache.create_temporary_subresource(cmd, sampler_state->external_subresource_desc)->bind();
+				}
 			}
 			else
 			{
@@ -454,7 +458,7 @@ void GLGSRender::end()
 			GLfloat colors[] = { 0.f, 0.f, 0.f, 0.f };
 			//It is impossible for the render target to be type A or B here (clear all would have been flagged)
 			for (auto &i : buffers_to_clear)
-				glClearBufferfv(m_draw_fbo->id(), i, colors);
+				glClearBufferfv(GL_COLOR, i, colors);
 		}
 
 		if (clear_depth)
@@ -1560,7 +1564,7 @@ void GLGSRender::update_draw_state()
 	m_begin_time += (u32)std::chrono::duration_cast<std::chrono::microseconds>(now - then).count();
 }
 
-void GLGSRender::flip(int buffer)
+void GLGSRender::flip(int buffer, bool emu_flip)
 {
 	if (skip_frame)
 	{
@@ -1640,10 +1644,10 @@ void GLGSRender::flip(int buffer)
 			}
 			else
 			{
-				const auto overlap_info = m_rtts.get_merged_texture_memory_region(absolute_address, buffer_width, buffer_height, buffer_pitch, 4);
-				verify(HERE), !overlap_info.empty();
+				gl::command_context cmd = { gl_state };
+				const auto overlap_info = m_rtts.get_merged_texture_memory_region(cmd, absolute_address, buffer_width, buffer_height, buffer_pitch, render_target_texture->get_bpp());
 
-				if (overlap_info.back().surface == render_target_texture)
+				if (!overlap_info.empty() && overlap_info.back().surface == render_target_texture)
 				{
 					// Confirmed to be the newest data source in that range
 					image = render_target_texture->raw_handle();
@@ -1669,11 +1673,11 @@ void GLGSRender::flip(int buffer)
 				}
 			}
 		}
-		else if (auto surface = m_gl_texture_cache.find_texture_from_dimensions(absolute_address, buffer_width, buffer_height))
+		else if (auto surface = m_gl_texture_cache.find_texture_from_dimensions<true>(absolute_address, buffer_width, buffer_height))
 		{
 			//Hack - this should be the first location to check for output
 			//The render might have been done offscreen or in software and a blit used to display
-			image = surface->get_raw_texture()->id();
+			if (const auto tex = surface->get_raw_texture(); tex) image = tex->id();
 		}
 
 		if (!image)
@@ -1785,7 +1789,7 @@ void GLGSRender::flip(int buffer)
 	}
 
 	m_frame->flip(m_context);
-	rsx::thread::flip(buffer);
+	rsx::thread::flip(buffer, emu_flip);
 
 	// Cleanup
 	m_gl_texture_cache.on_frame_end();
@@ -1825,8 +1829,8 @@ bool GLGSRender::on_access_violation(u32 address, bool is_writing)
 		is_writing ? (can_flush ? rsx::invalidation_cause::write : rsx::invalidation_cause::deferred_write)
 		           : (can_flush ? rsx::invalidation_cause::read  : rsx::invalidation_cause::deferred_read);
 
-	gl::command_context null_cmd;
-	auto result = m_gl_texture_cache.invalidate_address(null_cmd, address, cause);
+	auto cmd = can_flush ? gl::command_context{ gl_state } : gl::command_context{};
+	auto result = m_gl_texture_cache.invalidate_address(cmd, address, cause);
 
 	if (!result.violation_handled)
 		return false;
@@ -1906,7 +1910,7 @@ void GLGSRender::do_local_task(rsx::FIFO_state state)
 	{
 		if (!in_begin_end && async_flip_requested & flip_request::native_ui)
 		{
-			flip((s32)current_display_buffer);
+			flip((s32)current_display_buffer, false);
 		}
 	}
 }

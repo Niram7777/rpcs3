@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "Emu/Memory/vm.h"
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
@@ -46,34 +46,19 @@ void spu_recompiler::init()
 	}
 }
 
-spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
+bool spu_recompiler::compile(u64 last_reset_count, const std::vector<u32>& func)
 {
-	init();
+	const auto fn_location = m_spurt->find(last_reset_count, func);
 
-	std::unique_lock lock(m_spurt->m_mutex);
-
-	// Try to find existing function, register new one if necessary
-	const auto fn_info = m_spurt->m_map.emplace(std::move(func_rv), nullptr);
-
-	auto& fn_location = fn_info.first->second;
-
-	if (!fn_location && !fn_info.second)
+	if (fn_location == spu_runtime::g_dispatcher)
 	{
-		// Wait if already in progress
-		while (!fn_location)
-		{
-			m_spurt->m_cond.wait(lock);
-		}
+		return true;
 	}
 
-	if (fn_location)
+	if (!fn_location)
 	{
-		return fn_location;
+		return false;
 	}
-
-	auto& func = fn_info.first->first;
-
-	lock.unlock();
 
 	using namespace asmjit;
 
@@ -196,17 +181,31 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 	if (!g_cfg.core.spu_verification)
 	{
 		// Disable check (unsafe)
+		if (utils::has_avx())
+		{
+			c->vzeroupper();
+		}
 	}
 	else if (m_size == 4)
 	{
 		c->cmp(x86::dword_ptr(*ls, start), func[1]);
 		c->jnz(label_diff);
+
+		if (utils::has_avx())
+		{
+			c->vzeroupper();
+		}
 	}
 	else if (m_size == 8)
 	{
 		c->mov(*qw1, static_cast<u64>(func[2]) << 32 | func[1]);
 		c->cmp(*qw1, x86::qword_ptr(*ls, start));
 		c->jnz(label_diff);
+
+		if (utils::has_avx())
+		{
+			c->vzeroupper();
+		}
 	}
 	else if (utils::has_512() && false)
 	{
@@ -287,6 +286,7 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 
 		c->ktestw(x86::k1, x86::k1);
 		c->jnz(label_diff);
+		c->vzeroupper();
 	}
 	else if (utils::has_512())
 	{
@@ -407,6 +407,8 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 			c->vptest(x86::ymm0, x86::ymm0);
 			c->jnz(label_diff);
 		}
+
+		c->vzeroupper();
 	}
 	else if (utils::has_avx())
 	{
@@ -546,6 +548,8 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 			c->vptest(x86::ymm0, x86::ymm0);
 			c->jnz(label_diff);
 		}
+
+		c->vzeroupper();
 	}
 	else
 	{
@@ -674,11 +678,6 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 			c->test(x86::rax, x86::rax);
 			c->jne(label_diff);
 		}
-	}
-
-	if (utils::has_avx())
-	{
-		c->vzeroupper();
 	}
 
 	// Acknowledge success and add statistics
@@ -833,12 +832,20 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 	// Compile and get function address
 	spu_function_t fn;
 
-	if (m_asmrt.add(&fn, &code))
+	if (auto err = m_asmrt.add(&fn, &code))
 	{
+		if (err == asmjit::ErrorCode::kErrorNoVirtualMemory)
+		{
+			return false;
+		}
+
 		LOG_FATAL(SPU, "Failed to build a function");
 	}
 
-	m_spurt->add(*fn_info.first, fn);
+	if (!m_spurt->add(last_reset_count, fn_location, fn))
+	{
+		return false;
+	}
 
 	if (g_cfg.core.spu_debug)
 	{
@@ -848,15 +855,10 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 		log += "\n\n\n";
 
 		// Append log file
-		fs::file(m_spurt->m_cache_path + "spu.log", fs::write + fs::append).write(log);
+		fs::file(m_spurt->get_cache_path() + "spu.log", fs::write + fs::append).write(log);
 	}
 
-	if (m_cache && g_cfg.core.spu_cache)
-	{
-		m_cache->add(func);
-	}
-
-	return fn;
+	return true;
 }
 
 spu_recompiler::XmmLink spu_recompiler::XmmAlloc() // get empty xmm register
@@ -947,11 +949,21 @@ void spu_recompiler::branch_fixed(u32 target)
 		return;
 	}
 
+	const auto ppptr = m_spurt->make_branch_patchpoint(target);
+
 	c->mov(SPU_OFF_32(pc), target);
 	c->xor_(qw0->r32(), qw0->r32());
 	c->cmp(SPU_OFF_32(state), 0);
 	c->jnz(label_stop);
-	c->jmp(imm_ptr(m_spurt->make_branch_patchpoint(target)));
+
+	if (ppptr)
+	{
+		c->jmp(imm_ptr(ppptr));
+	}
+	else
+	{
+		c->ret();
+	}
 }
 
 void spu_recompiler::branch_indirect(spu_opcode_t op, bool jt, bool ret)
@@ -2678,7 +2690,23 @@ void spu_recompiler::IRET(spu_opcode_t op)
 
 void spu_recompiler::BISLED(spu_opcode_t op)
 {
-	fmt::throw_exception("Unimplemented instruction" HERE);
+	c->mov(*addr, SPU_OFF_32(gpr, op.ra, &v128::_u32, 3));
+	c->and_(*addr, 0x3fffc);
+
+	const XmmLink& vr = XmmAlloc();
+	c->movdqa(vr, XmmConst(_mm_set_epi32(spu_branch_target(m_pos + 4), 0, 0, 0)));
+	c->movdqa(SPU_OFF_128(gpr, op.rt), vr);
+
+	asmjit::Label branch_label = c->newLabel();
+	get_events();
+	c->jne(branch_label);
+
+	after.emplace_back([=]
+	{
+		c->align(asmjit::kAlignCode, 16);
+		c->bind(branch_label);
+		branch_indirect(op);
+	});
 }
 
 void spu_recompiler::HBR(spu_opcode_t op)
@@ -3426,7 +3454,7 @@ void spu_recompiler::FCGT(spu_opcode_t op)
 
 void spu_recompiler::DFCGT(spu_opcode_t op)
 {
-	fmt::throw_exception("Unexpected instruction" HERE);
+	UNK(op);
 }
 
 void spu_recompiler::FA(spu_opcode_t op)
@@ -3569,14 +3597,7 @@ void spu_recompiler::FCMGT(spu_opcode_t op)
 
 void spu_recompiler::DFCMGT(spu_opcode_t op)
 {
-	const auto mask = XmmConst(_mm_set1_epi64x(0x7fffffffffffffff));
-	const XmmLink& va = XmmGet(op.ra, XmmType::Double);
-	const XmmLink& vb = XmmGet(op.rb, XmmType::Double);
-
-	c->andpd(va, mask);
-	c->andpd(vb, mask);
-	c->cmppd(vb, va, 1);
-	c->movaps(SPU_OFF_128(gpr, op.rt), vb);
+	UNK(op);
 }
 
 void spu_recompiler::DFA(spu_opcode_t op)
@@ -3795,7 +3816,7 @@ void spu_recompiler::FSCRWR(spu_opcode_t op)
 
 void spu_recompiler::DFTSV(spu_opcode_t op)
 {
-	fmt::throw_exception("Unexpected instruction" HERE);
+	UNK(op);
 }
 
 void spu_recompiler::FCEQ(spu_opcode_t op)
@@ -3808,7 +3829,7 @@ void spu_recompiler::FCEQ(spu_opcode_t op)
 
 void spu_recompiler::DFCEQ(spu_opcode_t op)
 {
-	fmt::throw_exception("Unexpected instruction" HERE);
+	UNK(op);
 }
 
 void spu_recompiler::MPY(spu_opcode_t op)
@@ -3873,7 +3894,7 @@ void spu_recompiler::FCMEQ(spu_opcode_t op)
 
 void spu_recompiler::DFCMEQ(spu_opcode_t op)
 {
-	fmt::throw_exception("Unexpected instruction" HERE);
+	UNK(op);
 }
 
 void spu_recompiler::MPYU(spu_opcode_t op)
