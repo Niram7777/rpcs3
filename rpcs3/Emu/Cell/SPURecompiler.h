@@ -224,6 +224,9 @@ protected:
 	// List of function entry points and return points (set after BRSL, BRASL, BISL, BISLED)
 	std::bitset<0x10000> m_entry_info;
 
+	// Set after return points
+	std::bitset<0x10000> m_ret_info;
+
 	// Basic block information
 	struct block_info
 	{
@@ -232,6 +235,8 @@ protected:
 
 		// Number of instructions
 		u16 size = 0;
+
+		u8 analysis2 : 1;
 
 		// Bit mask of the registers modified in the block
 		std::bitset<s_reg_max> reg_mod{};
@@ -283,7 +288,7 @@ public:
 	virtual void init() = 0;
 
 	// Compile function (may fail)
-	virtual bool compile(u64 last_reset_count, const std::vector<u32>&) = 0;
+	virtual spu_function_t compile(u64 last_reset_count, const std::vector<u32>&) = 0;
 
 	// Compile function, handle failure
 	void make_function(const std::vector<u32>&);
