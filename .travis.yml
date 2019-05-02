@@ -1,37 +1,21 @@
 language: cpp
+
 matrix:
     include:
-#        - os: linux
-#          env:
-#            - NAME="Linux build"
-#            - COMPILER="gcc"
-#          dist: trusty
-#          services: docker
-#          cache: ccache
-#          install: "docker pull rpcs3/rpcs3-travis-trusty:1.0"
-#          script: 'travis_wait docker run -v $(pwd):/rpcs3 -v "$HOME/.ccache":/root/.ccache --env-file .travis/travis.env rpcs3/rpcs3-travis-trusty:1.0 /bin/bash -ex /rpcs3/.travis/build-linux.bash'
-        - os: linux
+       - os: linux
           env:
             - NAME="Linux build"
             - COMPILER="clang"
             - DEPLOY_APPIMAGE="true"
-          dist: trusty
+          dist: xenial
           services: docker
           cache: ccache
-          install: "docker pull rpcs3/rpcs3-travis-trusty:1.0"
-          script: 'travis_wait docker run -v $(pwd):/rpcs3 -v "$HOME/.ccache":/root/.ccache --env-file .travis/travis.env rpcs3/rpcs3-travis-trusty:1.0 /bin/bash -ex /rpcs3/.travis/build-linux.bash'
-        - os: osx
-          osx_image: xcode10.1
-          addons:
-            homebrew:
-                packages:
-                    - ccache
-                    - glew
-                    - ninja
-                    - qt
-          script: "/bin/bash -ex .travis/build-mac.bash"
-          cache: ccache
+          before_install:
+              - docker build -t rpcs3 .
+          script:
+              - source .dockerrc
+              - CC=clang CXX=clang++ BUILD_TYPE=Debug docker_rpcs3 -m -g
+              - mkdir coverage
+              - kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
+              - bash <(curl -s https://codecov.io/bash) -s coverage/
 
-git:
-  depth: false # Unshallow clone to obtain proper GIT_VERSION
-  submodules: false

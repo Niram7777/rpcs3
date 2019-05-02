@@ -1,0 +1,45 @@
+#
+# ~/.dockerrc
+#
+
+alias docker_nvidia='\
+docker run \
+ --runtime=nvidia \
+ -ti \
+ --rm \
+ -e DISPLAY \
+ -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
+ -e XAUTHORITY \
+ -v $XAUTHORITY:$XAUTHORITY:ro'
+
+alias sudo='sudo '
+
+docker_rpcs3() {
+    INPUT_GID=$(getent group input | cut -d: -f3)
+    AUDIO_GID=$(getent group audio | cut -d: -f3)
+    ENTRYPOINT_ARGS=$@
+
+    sudo CC="$CC" \
+        CXX="$CXX" \
+        BUILD_TYPE="$BUILD_TYPE" \
+        docker_nvidia \
+        --cap-add=SYS_PTRACE \
+        --device /dev/nvidia-modeset \
+        --device /dev/snd \
+        --device /dev/input \
+        --user developer \
+        --group-add "$INPUT_GID" \
+        --group-add "$AUDIO_GID" \
+        -v /usr/share/vulkan/icd.d/nvidia_icd.json:/usr/share/vulkan/icd.d/nvidia_icd.json:ro \
+        -v /opt/vulkansdk:/opt/vulkansdk \
+        -v /mnt/raid/Git/rpcs3:/home/developer/rpcs3 \
+        -v /mnt/raid/Git/rpcs3/.developer/xdg:/home/developer/xdg \
+        -v /mnt/raid/Git/rpcs3/.developer/.cache:/home/developer/.cache/rpcs3 \
+        -v /mnt/raid/Git/rpcs3/.developer/.config:/home/developer/.config/rpcs3 \
+        -v /run/media/marin/Samsung/Emu/:/home/developer/PS3:ro \
+        -e CC \
+        -e CXX \
+        -e BUILD_TYPE \
+        rpcs3 $ENTRYPOINT_ARGS
+}
+
