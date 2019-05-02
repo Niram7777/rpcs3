@@ -1,0 +1,13 @@
+.git
+*.dbg
+*.err
+*.out
+gdb.txt
+*Debug*
+*Release*
+.cproject
+.github
+coverage
+.cache
+.config
+.developer
