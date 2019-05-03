@@ -1,3 +1,5 @@
+sudo: required
+
 language: cpp
 
 services: docker
@@ -25,10 +27,11 @@ matrix:
 before_install:
   - git clone https://github.com/Niram7777/nvidia-docker.git ; cd nvidia-docker ; make ubuntu-latest ; cd -
   - docker build -t rpcs3 .
+  - git clone https://github.com/SimonKagstrom/kcov.git ; mkdir -p kcov/build ; cd kcov/build ; cmake -DCMAKE_BUILD_TYPE=Release .. ; make -j8 install ; cd - 
 script:
   - source .dockerrc
   - docker_rpcs3 -m -g
   - mkdir coverage
-  - kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
+  - /usr/local/bin/kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
   - bash <(curl -s https://codecov.io/bash) -s coverage/
 
