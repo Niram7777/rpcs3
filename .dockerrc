@@ -24,7 +24,7 @@ docker_rpcs3() {
         PRIVILEGE=sudo
     fi
 
-    "$PRIVILEGE" CC="$CC" \
+    CC="$CC" \
         CXX="$CXX" \
         BUILD_TYPE="$BUILD_TYPE" \
         docker_nvidia \
