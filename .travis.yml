@@ -3,21 +3,22 @@ language: cpp
 services: docker
 
 os: linux
-
-env:
-  - NAME="Linux build"
-  - COMPILER="clang"
-  - DEPLOY_APPIMAGE="true"
-
-dist: xenial
-
-before_install:
-  - docker build -t rpcs3 .
-
-script:
-  - source .dockerrc
-  - CC=clang CXX=clang++ BUILD_TYPE=Debug docker_rpcs3 -m -g
-  - mkdir coverage
-  - kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
-  - bash <(curl -s https://codecov.io/bash) -s coverage/
+matrix:
+  include:
+  - name: "Ubuntu Clang Debug"
+    env:
+      - NAME="Ubuntu"
+      - CC=clang
+      - CXX=clang++
+      - BUILD_TYPE=Debug 
+      - DEPLOY_APPIMAGE="true"
+    dist: xenial
+    before_install:
+      - docker build -t rpcs3 .
+    script:
+      - source .dockerrc
+      - docker_rpcs3 -m -g
+      - mkdir coverage
+      - kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
+      - bash <(curl -s https://codecov.io/bash) -s coverage/
 
