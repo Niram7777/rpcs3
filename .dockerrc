@@ -19,7 +19,12 @@ docker_rpcs3() {
     AUDIO_GID=$(getent group audio | cut -d: -f3)
     ENTRYPOINT_ARGS=$@
 
-    sudo CC="$CC" \
+    if [ $(id -u) != 0 ];
+    then
+        PRIVILEGE=sudo
+    fi
+
+    "$PRIVILEGE" CC="$CC" \
         CXX="$CXX" \
         BUILD_TYPE="$BUILD_TYPE" \
         docker_nvidia \
