@@ -12,26 +12,48 @@ compiler:
   - clang
   - gcc
 
-matrix:
-  include:
-  - name: "Ubuntu Clang Debug"
-    env:
-      - NAME="Ubuntu"
-      - BUILD_TYPE=Debug 
-  - name: "Ubuntu $CC Release"
-    env:
-      - NAME="Ubuntu"
-      - BUILD_TYPE=Release 
-      - DEPLOY_APPIMAGE="true"
+env:
+  - NAME="Ubuntu"
 
-before_install:
-  - git clone https://github.com/Niram7777/nvidia-docker.git ; cd nvidia-docker ; make ubuntu-latest ; cd -
-  - docker build -t rpcs3 .
-  - git clone https://github.com/SimonKagstrom/kcov.git ; mkdir -p kcov/build ; cd kcov/build ; cmake -DCMAKE_BUILD_TYPE=Release .. ; make -j8 ; cd - 
-script:
-  - source .dockerrc
-  - docker_rpcs3 -m -g
-  - mkdir coverage
-  - ./kcov/build/kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
-  - bash <(curl -s https://codecov.io/bash) -s coverage/
+env:
+  - BUILD_TYPE=Debug CODECOV_TOKEN="9ab821f8-1b72-4578-8d63-15b8167fbfd4"
+  - BUILD_TYPE=Release 
+
+jobs:  
+  include:
+    - stage: setup
+      name: "rpcs3 docker"
+      script:
+        - git clone https://github.com/Niram7777/nvidia-docker.git ; cd nvidia-docker ; make ubuntu-latest ; cd -
+        - docker build -t rpcs3 .
+    - 
+      name: "kcov build"
+      script:
+        - git clone https://github.com/SimonKagstrom/kcov.git ; mkdir -p kcov/build ; cd kcov/build ; cmake -DCMAKE_BUILD_TYPE=Release .. ; make -j8 ; cd - 
+
+    - stage: compile
+      name: "rpcs3 build"
+      script:
+        - source .dockerrc
+        - docker_rpcs3 -m
+
+    - stage: test
+      script:
+        - source .dockerrc
+        - docker_rpcs3 -g
+
+    - stage: coverage
+      if: env(BUILD_TYPE) = Debug && env(CC) = clang
+      env:
+        -  CODECOV_TOKEN="9ab821f8-1b72-4578-8d63-15b8167fbfd4"
+      script:
+        - mkdir coverage
+        - /usr/local/bin/kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
+        - bash <(curl -s https://codecov.io/bash) -s coverage/
+
+stages:
+  - setup
+  - compile
+  - test
+  - coverage
 
