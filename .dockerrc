@@ -19,15 +19,7 @@ docker_rpcs3() {
     AUDIO_GID=$(getent group audio | cut -d: -f3)
     ENTRYPOINT_ARGS=$@
 
-    if [ $(id -u) != 0 ];
-    then
-        PRIVILEGE=sudo
-    fi
-
-    sudo $SHELL -c echo 'alias $(id -u)' || true
-    sudo alias
-
-    sudo \
+    sudo -E \
         CC="$CC" \
         CXX="$CXX" \
         BUILD_TYPE="$BUILD_TYPE" \
@@ -51,7 +43,4 @@ docker_rpcs3() {
         -e BUILD_TYPE \
         rpcs3 $ENTRYPOINT_ARGS
 }
-
-echo "alias $(id -u)"
-alias
 
