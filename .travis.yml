@@ -19,72 +19,26 @@ env:
   - NAME="Ubuntu"
 
 env:
-  - BUILD_TYPE=Debug CODECOV_TOKEN="9ab821f8-1b72-4578-8d63-15b8167fbfd4"
+  - BUILD_TYPE=Debug
   - BUILD_TYPE=Release 
 
-jobs:  
-  include:
-    - stage: setup
-      name: "rpcs3 docker"
-      script:
-        - git clone https://github.com/Niram7777/nvidia-docker.git
-        - cd nvidia-docker
-        - make ubuntu-latest
-        - cd -
-        - docker build -t rpcs3 .
-#    - 
-#      name: "kcov build"
-#      before_install:
-        - sudo apt update
-        - |
-            sudo apt install \
-                binutils-dev \
-                build-essential \
-                cmake \
-                git \
-                libcurl4-openssl-dev \
-                libdw-dev \
-                libiberty-dev \
-                python \
-                zlib1g-dev
-#      script:
-        - git clone https://github.com/SimonKagstrom/kcov.git
-        - mkdir -p kcov/build
-        - cd kcov/build
-        - cmake -DCMAKE_BUILD_TYPE=Release ..
-        - make -j8 ; make install
-        - |
-            if [ -f "/usr/local/bin/kcov" ]; \
-            then \
-                export KCOV=/usr/local/bin/kcov \
-            else if [ -f "/usr/local/kcov" ] \
-                export KCOV=/usr/local/bin/kcov \
-            else \
-                export KCOV=$TRAVIS_BUILD_DIR/kcov/build/kcov \
-            fi
-        - echo $TRAVIS_BUILD_DIR ; cd - 
-#
-#    - stage: compile
-#      name: "rpcs3 build"
-#      script:
-        - source .dockerrc
-        - docker_rpcs3 -m
-#
-#    - stage: test
-#      script:
-        - source .dockerrc
-        - docker_rpcs3 -g
-#
-#    - stage: coverage
-#      if: env(BUILD_TYPE) = Debug && env(CC) = clang
-#      script:
-        - mkdir coverage
-        - "$KCOV" --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
-        - bash <(curl -s https://codecov.io/bash) -s coverage/
-
-stages:
-  - setup
-#  - compile
-#  - test
-#  - coverage
+script:
+  - git clone https://github.com/Niram7777/nvidia-docker.git
+  - cd nvidia-docker
+  - make ubuntu-latest
+  - cd -
+  - docker build -t rpcs3 .
+  - sudo apt update
+  - sudo apt install binutils-dev build-essential cmake git libcurl4-openssl-dev libdw-dev libiberty-dev python zlib1g-dev
+  - git clone https://github.com/SimonKagstrom/kcov.git
+  - mkdir -p kcov/build
+  - cd kcov/build
+  - cmake -DCMAKE_BUILD_TYPE=Release ..
+  - make -j8 ; make install
+  - cd -
+  - source .dockerrc ; touch /opt/vulkansdk/1.1.101.0/setup-env.sh
+  - docker_rpcs3 -m -g
+  - mkdir coverage
+  - /usr/local/bin/kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
+  - bash <(curl -s https://codecov.io/bash) -s coverage/
 
