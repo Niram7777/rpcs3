@@ -94,9 +94,13 @@ while getopts "h?vuamtc" opt; do
         then
             mkdir coverage
             ls -lah coverage
-            chmod -R o+rwx coverage
         fi
-        /usr/local/bin/kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_$BUILD_TYPE_$CC/bin/rpcs3 --help
+        
+        /usr/local/bin/kcov \
+            --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ \
+            ./Docker_$BUILD_TYPE_$CC/bin/rpcs3 --help
+        
+        chmod -R o+rwx coverage
         ;;
     esac
 done

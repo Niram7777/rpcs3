@@ -51,11 +51,11 @@ RUN curl -O http://ftp.fr.debian.org/debian/pool/non-free/n/nvidia-graphics-driv
 RUN apt install -y \
     binutils-dev build-essential cmake git libcurl4-openssl-dev libdw-dev libiberty-dev python zlib1g-dev
 
-RUN git clone https://github.com/SimonKagstrom/kcov.git \
-    mkdir -p kcov/build \
-    cd kcov/build \
-    cmake -DCMAKE_BUILD_TYPE=Release .. \
-    make -j8 \
+RUN git clone https://github.com/SimonKagstrom/kcov.git && \
+    mkdir -p kcov/build && \
+    cd kcov/build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j8 && \
     make install
 
 RUN rm -rf kcov
