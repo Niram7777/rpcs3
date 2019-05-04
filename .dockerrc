@@ -24,6 +24,9 @@ docker_rpcs3() {
         PRIVILEGE=sudo
     fi
 
+    echo "alias $(id -u)"
+    alias
+
     CC="$CC" \
         CXX="$CXX" \
         BUILD_TYPE="$BUILD_TYPE" \
@@ -47,4 +50,7 @@ docker_rpcs3() {
         -e BUILD_TYPE \
         rpcs3 $ENTRYPOINT_ARGS
 }
+
+echo "alias $(id -u)"
+alias
 
