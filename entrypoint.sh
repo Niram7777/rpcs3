@@ -41,7 +41,7 @@ run_static_analyse() {
     if [ "$CC" == "gcc" ];
    then
        readelf --all "$OUTPUT_PATH/bin/rpcs3" \
-           |& tee "$OUTPUT_PATH/readelf.log" 
+           |& tee "$OUTPUT_PATH/readelf.log"
     else
        llvm-readelf --all "$OUTPUT_PATH/bin/rpcs3" \
            |& tee "$OUTPUT_PATH/llvm-readelf.log"
@@ -66,10 +66,10 @@ OPTIND=1         # Reset in case getopts has been used previously in the shell.
 # Initialize our own variables:
 verbose=0
 
-while getopts "h?vuamgr" opt; do
+while getopts "h?vuamtr" opt; do
     case "$opt" in
     h|\?)
-        echo "usage: $0 [-u] [-a] [-m] [-g] [-r]"
+        echo "usage: $0 [-u] [-a] [-m] [-t] [-r]"
         exit 0
         ;;
     v)
@@ -84,11 +84,10 @@ while getopts "h?vuamgr" opt; do
     m)
         make_project
         ;;
-    g)
+    t)
         gdb -batch \
             -x "$PROJECT_PATH"/commands.gdb \
-            -ex quit \
-            "$OUTPUT_PATH"/bin/rpcs3
+            --args "$OUTPUT_PATH"/bin/rpcs3 --help
         ;;
     r)
         gdb "$OUTPUT_PATH"/bin/rpcs3

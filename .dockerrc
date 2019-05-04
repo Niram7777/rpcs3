@@ -38,6 +38,9 @@ docker_rpcs3() {
             --group-add "$AUDIO_GID""
     fi
 
+    ls -lah "$DOCKER_RPCS3_SESSION"
+    chmod 777 "$DOCKER_RPCS3_SESSION"
+
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer/xdg ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer/xdg
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer/.cache ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer/.cache
