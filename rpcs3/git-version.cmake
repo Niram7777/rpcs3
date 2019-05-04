@@ -31,6 +31,7 @@ if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git/")
 		OUTPUT_VARIABLE RPCS3_GIT_TAG)
 	if(NOT ${exit_code} EQUAL 0)
 		message(WARNING "git describe failed, unable to include git tag.")
+		set(RPCS3_GIT_TAG "unknown")
 	endif()
 
 	string(STRIP ${RPCS3_GIT_VERSION} RPCS3_GIT_VERSION)

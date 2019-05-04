@@ -31,7 +31,7 @@ update_project() {
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -H"$PROJECT_PATH" \
         -B"$OUTPUT_PATH" \
-        |& tee "$OUTPUT_PATH/make.log"
+        |& tee "$OUTPUT_PATH/cmake.log"
 }
 
 run_static_analyse() {
@@ -95,11 +95,11 @@ while getopts "h?vuamtc" opt; do
             mkdir coverage
             ls -lah coverage
         fi
-        
+
         /usr/local/bin/kcov \
             --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ \
             ./Docker_$BUILD_TYPE_$CC/bin/rpcs3 --help
-        
+
         chmod -R o+rwx coverage
         ;;
     esac
