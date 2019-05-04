@@ -24,10 +24,11 @@ docker_rpcs3() {
         PRIVILEGE=sudo
     fi
 
-    echo "alias $(id -u)"
-    alias
+    sudo $SHELL -c echo 'alias $(id -u)' || true
+    sudo alias
 
-    CC="$CC" \
+    sudo \
+        CC="$CC" \
         CXX="$CXX" \
         BUILD_TYPE="$BUILD_TYPE" \
         docker_nvidia \

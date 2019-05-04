@@ -28,6 +28,9 @@ jobs:
         - docker build -t rpcs3 .
     - 
       name: "kcov build"
+      before_install:
+        - sudo apt update
+        - sudo apt install libelf-dev libdwarf-dev
       script:
         - git clone https://github.com/SimonKagstrom/kcov.git ; mkdir -p kcov/build ; cd kcov/build ; cmake -DCMAKE_BUILD_TYPE=Release .. ; make -j8 ; cd - 
 
