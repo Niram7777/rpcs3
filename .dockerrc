@@ -19,7 +19,7 @@ docker_rpcs3() {
     AUDIO_GID=$(getent group audio | cut -d: -f3)
     ENTRYPOINT_ARGS=$@
 
-    sudo -E \
+    sudo -E $SHELL -c "\
         CC="$CC" \
         CXX="$CXX" \
         BUILD_TYPE="$BUILD_TYPE" \
@@ -41,6 +41,6 @@ docker_rpcs3() {
         -e CC \
         -e CXX \
         -e BUILD_TYPE \
-        rpcs3 $ENTRYPOINT_ARGS
+        rpcs3 $ENTRYPOINT_ARGS"
 }
 

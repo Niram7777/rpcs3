@@ -1,4 +1,6 @@
 sudo: required
+git:
+  depth: 1
 
 language: cpp
 
@@ -30,9 +32,24 @@ jobs:
       name: "kcov build"
       before_install:
         - sudo apt update
-        - sudo apt install libelf-dev libdwarf-dev
+        - >
+            sudo apt install libdwarf-dev
+                binutils-dev
+                build-essential \
+                cmake \
+                git \
+                libcurl4-openssl-dev \
+                libdw-dev \
+                libiberty-dev \
+                python \
+                zlib1g-dev
       script:
-        - git clone https://github.com/SimonKagstrom/kcov.git ; mkdir -p kcov/build ; cd kcov/build ; cmake -DCMAKE_BUILD_TYPE=Release .. ; make -j8 ; cd - 
+        - git clone https://github.com/SimonKagstrom/kcov.git
+        - mkdir -p kcov/build
+        - cd kcov/build
+        - cmake -DCMAKE_BUILD_TYPE=Release ..
+        - make -j8
+        - cd - 
 
     - stage: compile
       name: "rpcs3 build"
