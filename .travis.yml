@@ -1,6 +1,7 @@
 sudo: required
 git:
   depth: 1
+  submodules_depth: 1
 
 language: cpp
 
@@ -32,9 +33,9 @@ jobs:
       name: "kcov build"
       before_install:
         - sudo apt update
-        - >
-            sudo apt install libdwarf-dev
-                binutils-dev
+        - |
+            sudo apt install libdwarf-dev \
+                binutils-dev \
                 build-essential \
                 cmake \
                 git \
