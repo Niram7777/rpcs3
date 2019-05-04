@@ -27,7 +27,10 @@ jobs:
     - stage: setup
       name: "rpcs3 docker"
       script:
-        - git clone https://github.com/Niram7777/nvidia-docker.git ; cd nvidia-docker ; make ubuntu-latest ; cd -
+        - git clone https://github.com/Niram7777/nvidia-docker.git
+        - cd nvidia-docker
+        - make ubuntu-latest
+        - cd -
         - docker build -t rpcs3 .
 #    - 
 #      name: "kcov build"
@@ -49,9 +52,17 @@ jobs:
         - mkdir -p kcov/build
         - cd kcov/build
         - cmake -DCMAKE_BUILD_TYPE=Release ..
-        - make -j8
-        - which -a kcov || find / -name kcov || ls *
-        - cd - 
+        - make -j8 ; make install
+        - |
+            if [ -f "/usr/local/bin/kcov" ]; \
+            then \
+                export KCOV=/usr/local/bin/kcov \
+            else if [ -f "/usr/local/kcov" ] \
+                export KCOV=/usr/local/bin/kcov \
+            else \
+                export KCOV=$TRAVIS_BUILD_DIR/kcov/build/kcov \
+            fi
+        - echo $TRAVIS_BUILD_DIR ; cd - 
 #
 #    - stage: compile
 #      name: "rpcs3 build"
@@ -68,12 +79,12 @@ jobs:
 #      if: env(BUILD_TYPE) = Debug && env(CC) = clang
 #      script:
         - mkdir coverage
-        - /usr/local/bin/kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
+        - "$KCOV" --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
         - bash <(curl -s https://codecov.io/bash) -s coverage/
 
 stages:
   - setup
-  - compile
-  - test
-  - coverage
+#  - compile
+#  - test
+#  - coverage
 
