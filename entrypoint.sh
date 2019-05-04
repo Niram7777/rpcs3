@@ -2,7 +2,7 @@
 
 set -ex
 
-. /opt/vulkansdk/1.1.101.0/setup-env.sh
+#. /opt/vulkansdk/1.1.101.0/setup-env.sh
 
 PAR_JOBS="-j$(nproc)"
 
