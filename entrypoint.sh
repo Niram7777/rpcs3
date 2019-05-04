@@ -66,10 +66,10 @@ OPTIND=1         # Reset in case getopts has been used previously in the shell.
 # Initialize our own variables:
 verbose=0
 
-while getopts "h?vuamtr" opt; do
+while getopts "h?vuamtc" opt; do
     case "$opt" in
     h|\?)
-        echo "usage: $0 [-u] [-a] [-m] [-t] [-r]"
+        echo "usage: $0 [-u] [-a] [-m] [-t] [-c]"
         exit 0
         ;;
     v)
@@ -89,8 +89,14 @@ while getopts "h?vuamtr" opt; do
             -x "$PROJECT_PATH"/commands.gdb \
             --args "$OUTPUT_PATH"/bin/rpcs3 --help
         ;;
-    r)
-        gdb "$OUTPUT_PATH"/bin/rpcs3
+    c)
+        if [ ! -d "coverage" ];
+        then
+            mkdir coverage
+            ls -lah coverage
+            chmod -R o+rwx coverage
+        fi
+        /usr/local/bin/kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_$BUILD_TYPE_$CC/bin/rpcs3 --help
         ;;
     esac
 done

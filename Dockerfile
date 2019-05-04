@@ -48,6 +48,18 @@ RUN curl -O http://ftp.fr.debian.org/debian/pool/non-free/n/nvidia-graphics-driv
 #RUN mknod -m 666 /dev/nvidia-modeset c 195 254
 #RUN nvidia-modprobe -m -u -c 0 -i 0
 
+RUN apt install -y \
+    binutils-dev build-essential cmake git libcurl4-openssl-dev libdw-dev libiberty-dev python zlib1g-dev
+
+RUN git clone https://github.com/SimonKagstrom/kcov.git \
+    mkdir -p kcov/build \
+    cd kcov/build \
+    cmake -DCMAKE_BUILD_TYPE=Release .. \
+    make -j8 \
+    make install
+
+RUN rm -rf kcov
+
 # Create non root user
 # Replace 1000 with your user / group id
 ENV uid=1000 \
@@ -71,12 +83,4 @@ VOLUME $HOME/rpcs3
 WORKDIR $HOME/rpcs3
 
 ENTRYPOINT ["/bin/bash", "entrypoint.sh"]
-
-#(gdb) --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
-#docker run --runtime=nvidia \
-#	--device /dev/nvidia-modeset --device /dev/snd --device /dev/input \
-#	 -ti --rm -e DISPLAY \
-#	-v /tmp/.X11-unix:/tmp/.X11-unix -v /usr/share/vulkan/icd.d/nvidia_icd.json:/usr/share/vulkan/icd.d/nvidia_icd.json
-#	-v /media/marin/Samsung/Git/rpcs3/build:/home/developer/rpcs3/build -v /media/marin/Samsung/Emu/PS3:/home/developer/PS3 -v /media/marin/Maxtor/rpcs3:/home/developer/.config/rpcs3 \
-#	rpcs3
 

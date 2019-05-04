@@ -39,7 +39,7 @@ docker_rpcs3() {
     fi
 
     ls -lah "$DOCKER_RPCS3_SESSION"
-    chmod 777 "$DOCKER_RPCS3_SESSION"
+    chmod -R o+rwx "$DOCKER_RPCS3_SESSION"
 
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer/xdg ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer/xdg
