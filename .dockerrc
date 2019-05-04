@@ -8,28 +8,46 @@ docker_rpcs3() {
     ENTRYPOINT_ARGS=$@
     DOCKER_RPCS3_SESSION="$PWD"
 
+    if id travis &> /dev/null;
+    then
+        NVIDIA_ARGS="--runtime=nvidia \
+            -e DISPLAY \
+            -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
+            -e XAUTHORITY \
+            -v $XAUTHORITY:$XAUTHORITY:ro \
+            --device /dev/nvidia-modeset \
+            -v /usr/share/vulkan/icd.d/nvidia_icd.json:/usr/share/vulkan/icd.d/nvidia_icd.json:ro \
+            -v /opt/vulkansdk:/opt/vulkansdk"
+    fi
+
+    if [ -z "INPUT_GID" ];
+    then
+        echo "Without Input (controller)"
+    else
+        INPUT="--device /dev/input \
+            --group-add "$INPUT_GID""
+    fi
+
+    if [ -z "AUDIO_GID" ];
+    then
+        echo "Without Audio"
+    else
+        AUDIO="--device /dev/snd \
+            --group-add "$AUDIO_GID""
+    fi
+
     docker run \
-        --runtime=nvidia \
+        "$NVIDIA_ARGS" \
         -ti \
         --rm \
-        -e DISPLAY \
-        -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
-        -e XAUTHORITY \
-        -v $XAUTHORITY:$XAUTHORITY:ro \
         --cap-add=SYS_PTRACE \
-        --device /dev/nvidia-modeset \
-        --device /dev/snd \
-        --device /dev/input \
+        "$INPUT" \
+        "$AUDIO" \
         --user developer \
-        --group-add "$INPUT_GID" \
-        --group-add "$AUDIO_GID" \
-        -v /usr/share/vulkan/icd.d/nvidia_icd.json:/usr/share/vulkan/icd.d/nvidia_icd.json:ro \
-        -v /opt/vulkansdk:/opt/vulkansdk \
         -v "$DOCKER_RPCS3_SESSION":/home/developer/rpcs3 \
         -v "$DOCKER_RPCS3_SESSION"/.developer/xdg:/home/developer/xdg \
         -v "$DOCKER_RPCS3_SESSION"/.developer/.cache:/home/developer/.cache/rpcs3 \
         -v "$DOCKER_RPCS3_SESSION"/.developer/.config:/home/developer/.config/rpcs3 \
-        -v /run/media/marin/Samsung/Emu/:/home/developer/PS3:ro \
         -e CC \
         -e CXX \
         -e BUILD_TYPE \

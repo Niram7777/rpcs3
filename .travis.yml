@@ -55,11 +55,13 @@ jobs:
     - stage: compile
       name: "rpcs3 build"
       script:
+        - set -ex
         - source .dockerrc
         - docker_rpcs3 -m
 
     - stage: test
       script:
+        - set -ex
         - source .dockerrc
         - docker_rpcs3 -g
 
