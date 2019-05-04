@@ -19,7 +19,8 @@ docker_rpcs3() {
     AUDIO_GID=$(getent group audio | cut -d: -f3)
     ENTRYPOINT_ARGS=$@
 
-    sudo -E $SHELL -c "\
+    sudo -E $SHELL \
+        -c "source $PWD/.dockerrc ; \
         CC="$CC" \
         CXX="$CXX" \
         BUILD_TYPE="$BUILD_TYPE" \
