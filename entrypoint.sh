@@ -39,10 +39,12 @@ run_static_analyse() {
         |& tee "$OUTPUT_PATH/run-clang-tidy.log"
 
     if [ "$CC" == "gcc" ];
-    then
-       readelf --all "$OUTPUT_PATH/bin/rpcs3" | less
+   then
+       readelf --all "$OUTPUT_PATH/bin/rpcs3" \
+           |& tee "$OUTPUT_PATH/readelf.log" 
     else
-       llvm-readelf --all "$OUTPUT_PATH/bin/rpcs3" | less
+       llvm-readelf --all "$OUTPUT_PATH/bin/rpcs3" \
+           |& tee "$OUTPUT_PATH/llvm-readelf.log"
     fi
 }
 

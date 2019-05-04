@@ -34,10 +34,10 @@ script:
   - mkdir -p kcov/build
   - cd kcov/build
   - cmake -DCMAKE_BUILD_TYPE=Release ..
-  - make -j8 ; make install
+  - make -j8 ; sudo make install
   - cd -
-  - source .dockerrc ; touch /opt/vulkansdk/1.1.101.0/setup-env.sh
-  - docker_rpcs3 -m -g
+  - source .dockerrc
+  - docker_rpcs3 -u -m -g
   - mkdir coverage
   - /usr/local/bin/kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
   - bash <(curl -s https://codecov.io/bash) -s coverage/
