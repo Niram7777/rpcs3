@@ -29,9 +29,9 @@ jobs:
       script:
         - git clone https://github.com/Niram7777/nvidia-docker.git ; cd nvidia-docker ; make ubuntu-latest ; cd -
         - docker build -t rpcs3 .
-    - 
-      name: "kcov build"
-      before_install:
+#    - 
+#      name: "kcov build"
+#      before_install:
         - sudo apt update
         - |
             sudo apt install \
@@ -44,30 +44,29 @@ jobs:
                 libiberty-dev \
                 python \
                 zlib1g-dev
-      script:
+#      script:
         - git clone https://github.com/SimonKagstrom/kcov.git
         - mkdir -p kcov/build
         - cd kcov/build
         - cmake -DCMAKE_BUILD_TYPE=Release ..
         - make -j8
+        - which -a kcov || find / -name kcov || ls *
         - cd - 
-
-    - stage: compile
-      name: "rpcs3 build"
-      script:
+#
+#    - stage: compile
+#      name: "rpcs3 build"
+#      script:
         - source .dockerrc
         - docker_rpcs3 -m
-
-    - stage: test
-      script:
+#
+#    - stage: test
+#      script:
         - source .dockerrc
         - docker_rpcs3 -g
-
-    - stage: coverage
-      if: env(BUILD_TYPE) = Debug && env(CC) = clang
-      env:
-        -  CODECOV_TOKEN="9ab821f8-1b72-4578-8d63-15b8167fbfd4"
-      script:
+#
+#    - stage: coverage
+#      if: env(BUILD_TYPE) = Debug && env(CC) = clang
+#      script:
         - mkdir coverage
         - /usr/local/bin/kcov --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ ./Docker_Debug_clang/bin/rpcs3
         - bash <(curl -s https://codecov.io/bash) -s coverage/
