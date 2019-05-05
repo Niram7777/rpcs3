@@ -24,6 +24,7 @@ env:
 #  - BUILD_TYPE=Release 
 
 cache:
+  timeout: 6000
   ccache: true
   directories:
     - Docker_"$BUILD_TYPE"_"$CC"
