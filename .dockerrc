@@ -55,6 +55,7 @@ docker_rpcs3() {
         --user developer \
         -v "$DOCKER_RPCS3_SESSION":/home/developer/rpcs3 \
         -v "$DOCKER_RPCS3_SESSION"/.developer/xdg:/home/developer/xdg \
+        -v "$HOME/.ccache":/home/developer/.ccache \
         -v "$DOCKER_RPCS3_SESSION"/.developer/.cache:/home/developer/.cache/rpcs3 \
         -v "$DOCKER_RPCS3_SESSION"/.developer/.config:/home/developer/.config/rpcs3 \
         -e CC \
