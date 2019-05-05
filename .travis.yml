@@ -37,6 +37,7 @@ script:
   - make ubuntu-latest -C nvidia-docker
   - docker build -t rpcs3 .
   - source .dockerrc
+  - chmod -R o+rwx "$HOME/.ccache"
   - docker_rpcs3 -u -m -t -c
   - ccache -s
   - bash <(curl -s https://codecov.io/bash) -s coverage/
