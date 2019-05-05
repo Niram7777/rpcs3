@@ -4,14 +4,6 @@ git:
   depth: 1
   submodules_depth: 1
 
-cache:
-  directories:
-    - /home/travis/build/Niram7777/rpcs3/Docker_"$BUILD_TYPE"_"$CC"
-    - /home/travis/build/Niram7777/rpcs3/Docker_Debug_clang
-    - /home/travis/.ccache
-
-cache: ccache
-
 language: cpp
 
 services: docker
@@ -30,6 +22,13 @@ env:
 env:
   - BUILD_TYPE=Debug
 #  - BUILD_TYPE=Release 
+
+cache:
+  ccache: true
+  directories:
+    - Docker_"$BUILD_TYPE"_"$CC"
+    - rpcs3/Docker_Debug_clang
+    - /home/travis/.ccache
 
 script:
   - git clone https://github.com/Niram7777/nvidia-docker.git
