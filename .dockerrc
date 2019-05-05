@@ -38,7 +38,6 @@ docker_rpcs3() {
             --group-add "$AUDIO_GID""
     fi
 
-    chmod -R 777 /home/travis/.ccache
     chmod -R 777 "$DOCKER_RPCS3_SESSION"
 
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer
