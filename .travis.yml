@@ -33,7 +33,8 @@ cache:
 script:
   - git clone https://github.com/Niram7777/nvidia-docker.git
   - make ubuntu-latest -C nvidia-docker |& > nvidia-docker.log
-  - docker build -t rpcs3 . |& > rpcs3-docker.log
+  - docker build -t rpcs3 . > rpcs3-docker.log
+  - docker images
   - source .dockerrc
   - sudo chmod -R 777 Docker_"$BUILD_TYPE"_"$CC"
   - sudo chmod -R 777 /home/travis/.ccache
