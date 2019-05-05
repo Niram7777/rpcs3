@@ -10,8 +10,6 @@ export CCACHE_DIR=$HOME/.ccache
 ccache -F 0
 ccache -M 0
 
-timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
-
 du -h $HOME/.ccache
 
 PAR_JOBS="-j4"
@@ -92,8 +90,9 @@ while getopts "h?vuamtc" opt; do
         run_static_analyse
         ;;
     m)
+        export -f make_project
         ccache -s
-        timeout 1800 make_project || true
+        timeout 1800 bash -c make_project || echo "Travis CI: Too late!"
         ccache -s
         ;;
     t)
