@@ -5,11 +5,11 @@ git:
   submodules_depth: 1
 
 cache:
+  - ccache
   directories:
     - /home/travis/build/Niram7777/rpcs3/Docker_"$BUILD_TYPE"_"$CC"
     - /home/travis/build/Niram7777/rpcs3/Docker_Debug_clang
-
-cache: ccache
+    - /home/travis/.ccache
 
 language: cpp
 
@@ -35,7 +35,9 @@ script:
   - make ubuntu-latest -C nvidia-docker
   - docker build -t rpcs3 .
   - source .dockerrc
-  - chmod -R o+rwx "$HOME/.ccache"
+  - ccache -F 0
+  - ccache -M 0
+  - du -h $HOME/.ccache
   - docker_rpcs3 -u -m -t -c
   - bash <(curl -s https://codecov.io/bash) -s coverage/
 

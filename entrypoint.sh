@@ -6,10 +6,13 @@ umask 000
 
 #. /opt/vulkansdk/1.1.101.0/setup-env.sh
 export PATH="/usr/lib/ccache:$PATH"
+export CCACHE_DIR=$HOME/.ccache
 ccache -F 0
 ccache -M 0
-  
-PAR_JOBS="-j$(nproc)"
+
+du -h $HOME/.ccache
+
+PAR_JOBS="-j4"
 
 if [ -z "$CC" ] || [ -z "$CXX" ];
 then
