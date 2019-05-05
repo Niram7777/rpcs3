@@ -28,7 +28,6 @@ cache:
   ccache: true
   directories:
     - Docker_"$BUILD_TYPE"_"$CC"
-    - rpcs3/Docker_Debug_clang
     - /home/travis/.ccache
 
 script:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -ex
+set -aex
 
 umask 000
 
@@ -90,7 +90,6 @@ while getopts "h?vuamtc" opt; do
         run_static_analyse
         ;;
     m)
-        export -f make_project
         ccache -s
         timeout 1800 bash -c make_project || echo "Travis CI: Too late!"
         ccache -s
