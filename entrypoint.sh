@@ -91,7 +91,8 @@ while getopts "h?vuamtc" opt; do
         ;;
     m)
         ccache -s
-        timeout 1800 bash -c make_project || echo "Travis CI: Too late!"
+        timeout 1500 bash -c make_project || echo "Travis CI: Too late!"
+        sleep 5
         ccache -s
         ;;
     t)
