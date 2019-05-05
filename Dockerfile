@@ -73,8 +73,8 @@ RUN groupadd developer && \
         --uid $uid \
         --gid $uid \
         -s /bin/bash \
-        --create-home
-#        --groups audio,messagebus
+        --create-home && \
+    umask 000
 
 USER developer
 

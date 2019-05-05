@@ -10,7 +10,7 @@ docker_rpcs3() {
 
     if id travis &> /dev/null;
     then
-        echo "Whitout OpenGL/Vulkan"
+        echo "Without OpenGL/Vulkan"
     else
         NVIDIA_ARGS="--runtime=nvidia \
             -e DISPLAY \
@@ -38,7 +38,6 @@ docker_rpcs3() {
             --group-add "$AUDIO_GID""
     fi
 
-    ls -lah "$DOCKER_RPCS3_SESSION"
     chmod -R o+rwx "$DOCKER_RPCS3_SESSION"
 
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer

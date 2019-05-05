@@ -2,7 +2,9 @@ sudo: required
 git:
   depth: 1
   submodules_depth: 1
-
+cache:
+  directories:
+    - /home/travis/build/Niram7777/rpcs3/Docker_"$BUILD_TYPE"_"$CC"
 language: cpp
 
 services: docker
@@ -24,9 +26,7 @@ env:
 
 script:
   - git clone https://github.com/Niram7777/nvidia-docker.git
-  - cd nvidia-docker
-  - make ubuntu-latest
-  - cd -
+  - make ubuntu-latest -C nvidia-docker
   - docker build -t rpcs3 .
   - source .dockerrc
   - docker_rpcs3 -u -m -t -c
