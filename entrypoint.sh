@@ -2,11 +2,12 @@
 
 set -ex
 
+umask 000
+
 #. /opt/vulkansdk/1.1.101.0/setup-env.sh
 export PATH="/usr/lib/ccache:$PATH"
 ccache -F 0
 ccache -M 0
-which -a g++ gcc clang clang++
   
 PAR_JOBS="-j$(nproc)"
 
@@ -99,18 +100,11 @@ while getopts "h?vuamtc" opt; do
         if [ ! -d "coverage" ];
         then
             mkdir coverage
-            ls -lah coverage
-            umask 000
-            ls -lah coverage
         fi
 
         /usr/local/bin/kcov \
             --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ \
             ./Docker_$BUILD_TYPE_$CC/bin/rpcs3 --help
-
-        ls -lah coverage/*
-        chmod -R o+rwx coverage
-        ls -lah coverage/*
         ;;
     esac
 done
