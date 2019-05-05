@@ -60,6 +60,8 @@ RUN git clone https://github.com/SimonKagstrom/kcov.git && \
 
 RUN rm -rf kcov
 
+RUN apt install -y ccache && /usr/sbin/update-ccache-symlinks
+
 # Create non root user
 # Replace 1000 with your user / group id
 ENV uid=1000 \

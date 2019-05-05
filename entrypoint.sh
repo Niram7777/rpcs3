@@ -3,7 +3,11 @@
 set -ex
 
 #. /opt/vulkansdk/1.1.101.0/setup-env.sh
-
+export PATH="/usr/lib/ccache:$PATH"
+ccache -F 0
+ccache -M 0
+which -a g++ gcc clang clang++
+  
 PAR_JOBS="-j$(nproc)"
 
 if [ -z "$CC" ] || [ -z "$CXX" ];
@@ -82,7 +86,9 @@ while getopts "h?vuamtc" opt; do
         run_static_analyse
         ;;
     m)
+        ccache -s
         make_project
+        ccache -s
         ;;
     t)
         gdb -batch \

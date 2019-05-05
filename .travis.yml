@@ -1,10 +1,16 @@
 sudo: required
+
 git:
   depth: 1
   submodules_depth: 1
+
 cache:
   directories:
     - /home/travis/build/Niram7777/rpcs3/Docker_"$BUILD_TYPE"_"$CC"
+    - /home/travis/build/Niram7777/rpcs3/Docker_Debug_clang
+
+cache: ccache
+
 language: cpp
 
 services: docker
@@ -15,20 +21,23 @@ dist: xenial
 
 compiler:
   - clang
-  - gcc
+#  - gcc
 
 env:
   - NAME="Ubuntu"
 
 env:
   - BUILD_TYPE=Debug
-  - BUILD_TYPE=Release 
+#  - BUILD_TYPE=Release 
 
 script:
+  - ccache -s
+  - which -a g++ gcc clang clang++
   - git clone https://github.com/Niram7777/nvidia-docker.git
   - make ubuntu-latest -C nvidia-docker
   - docker build -t rpcs3 .
   - source .dockerrc
   - docker_rpcs3 -u -m -t -c
+  - ccache -s
   - bash <(curl -s https://codecov.io/bash) -s coverage/
 
