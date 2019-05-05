@@ -5,11 +5,12 @@ git:
   submodules_depth: 1
 
 cache:
-  - ccache
   directories:
     - /home/travis/build/Niram7777/rpcs3/Docker_"$BUILD_TYPE"_"$CC"
     - /home/travis/build/Niram7777/rpcs3/Docker_Debug_clang
     - /home/travis/.ccache
+
+cache: ccache
 
 language: cpp
 
