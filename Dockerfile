@@ -1,3 +1,4 @@
+ARG U_ID
 ARG G_ID
 
 FROM nvidia_ubuntu_19.04-devel
@@ -65,7 +66,7 @@ RUN apt install -y ccache && /usr/sbin/update-ccache-symlinks
 
 # Create non root user
 # Replace 1000 with your user / group id
-ENV uid=1000 \
+ENV uid=${U_ID} \
 	gid=${G_ID} \
 	HOME=/home/developer \
     XDG_RUNTIME_DIR=$HOME/xdg 

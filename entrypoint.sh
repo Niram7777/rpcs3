@@ -10,6 +10,8 @@ export CCACHE_DIR=$HOME/.ccache
 ccache -F 0
 ccache -M 0
 
+ls -lah /home/developer/rpcs3/rpcs3/git-version.h
+
 PAR_JOBS="-j$(nproc)"
 
 if [ -z "$CC" ] || [ -z "$CXX" ];
