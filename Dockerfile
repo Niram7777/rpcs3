@@ -1,4 +1,5 @@
-#FROM nvidia/opengl:1.0-glvnd-devel-ubuntu18.04
+ARG G_ID
+
 FROM nvidia_ubuntu_19.04-devel
 MAINTAINER Marin "marin6314@gmail.com"
 
@@ -65,7 +66,7 @@ RUN apt install -y ccache && /usr/sbin/update-ccache-symlinks
 # Create non root user
 # Replace 1000 with your user / group id
 ENV uid=1000 \
-	gid=1000 \
+	gid=${G_ID} \
 	HOME=/home/developer \
     XDG_RUNTIME_DIR=$HOME/xdg 
 
