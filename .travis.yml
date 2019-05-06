@@ -25,9 +25,9 @@ env:
 
 cache:
   timeout: 6000
+  ccache: true
   directories:
     - Docker_"$BUILD_TYPE"_"$CC"
-    - /home/travis/.ccache
 
 script:
   - umask 000
