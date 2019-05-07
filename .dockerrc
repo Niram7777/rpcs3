@@ -50,6 +50,7 @@ docker_rpcs3() {
         --cap-add=SYS_PTRACE \
         $INPUT \
         $AUDIO \
+        --group-add $(id -g)
         --user developer \
         -v "$DOCKER_RPCS3_SESSION":/home/developer/rpcs3 \
         -v "$DOCKER_RPCS3_SESSION"/.developer/xdg:/home/developer/xdg \
