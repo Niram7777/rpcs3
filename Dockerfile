@@ -1,6 +1,3 @@
-ARG U_ID
-ARG G_ID
-
 FROM nvidia_ubuntu_19.04-devel
 MAINTAINER Marin "marin6314@gmail.com"
 
@@ -57,12 +54,15 @@ RUN git clone https://github.com/SimonKagstrom/kcov.git && \
     mkdir -p kcov/build && \
     cd kcov/build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
-    make -j8 && \
+    make -j$(nproc) && \
     make install
 
 RUN rm -rf kcov
 
 RUN apt install -y ccache && /usr/sbin/update-ccache-symlinks
+
+ARG U_ID
+ARG G_ID
 
 # Create non root user
 # Replace 1000 with your user / group id
