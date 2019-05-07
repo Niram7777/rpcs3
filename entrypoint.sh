@@ -10,7 +10,7 @@ export CCACHE_DIR=$HOME/.ccache
 ccache -F 0
 ccache -M 0
 
-ls -lah $(find $PWD -name git-version.h)
+find $PWD -name git-version.h
 
 PAR_JOBS="-j$(nproc)"
 
