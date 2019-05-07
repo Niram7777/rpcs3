@@ -10,7 +10,7 @@ export CCACHE_DIR=$HOME/.ccache
 ccache -F 0
 ccache -M 0
 
-find $PWD -name git-version.h
+ls -lah *
 
 PAR_JOBS="-j$(nproc)"
 
@@ -108,7 +108,7 @@ while getopts "h?vuamtc" opt; do
 
         /usr/local/bin/kcov \
             --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ \
-            ./Docker_$BUILD_TYPE_$CC/bin/rpcs3 --help
+            ./Docker_$BUILD_TYPE_$CC/bin/rpcs3 --version
         ;;
     esac
 done
