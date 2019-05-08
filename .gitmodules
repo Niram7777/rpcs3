@@ -8,7 +8,8 @@
 	ignore = dirty
 [submodule "llvm"]
 	path = llvm
-	url = https://github.com/RPCS3/llvm
+#	url = https://github.com/RPCS3/llvm
+	url = https://github.com/Niram7777/llvm
 	branch = release_60
 	ignore = dirty
 [submodule "GSL"]
