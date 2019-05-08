@@ -6,7 +6,7 @@ umask 000
 
 #. /opt/vulkansdk/1.1.101.0/setup-env.sh
 export PATH="/usr/lib/ccache:$PATH"
-export CCACHE_DIR=$HOME/.ccache
+echo "cache_dir = $HOME/.ccache" > ~/.ccache/ccache.conf
 ccache -F 0
 ccache -M 0
 
