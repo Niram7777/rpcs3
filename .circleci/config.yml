@@ -25,7 +25,7 @@ jobs:
           command: |
             git clone -j $(nproc) --recurse-submodules --depth=1 --branch=$CIRCLE_BRANCH https://github.com/Niram7777/rpcs3.git rpcs3
             git -C rpcs3 pull --recurse-submodules --depth=1
-#            git -C rpcs3 submodule update --init --recursive --depth=1
+            git -C rpcs3 submodule update --init --recursive --depth=1
       - save_cache:
           key: source-v1-{{ .Branch }}-{{ .Revision }}
           paths:
@@ -34,14 +34,14 @@ jobs:
             - "~/rpcs3/**/*/.git"
 
       - restore_cache:
-          keys: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+          keys: build-v1-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
       - run:
           name: Build and test
           command: |
             cd ~/rpcs3
-            ~/rpcs3/.circleci/build_test.sh
+            bash ~/rpcs3/.circleci/build_test.sh
       - save_cache:
-          key: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+          key: build-v1-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
           paths:
               - ~/rpcs3/Docker_\"$BUILD_TYPE\"_\"$CC\"
               - ~/.ccache
