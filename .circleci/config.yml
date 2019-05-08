@@ -30,8 +30,8 @@ jobs:
           key: source-v1-{{ .Branch }}-{{ .Revision }}
           paths:
             - "~/rpcs3/.git"
-            - "~/rpcs3/*.git"
-
+            - "~/rpcs3/*/.git"
+            - "~/rpcs3/**/*/.git"
       - restore_cache:
           keys: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
       - run:
