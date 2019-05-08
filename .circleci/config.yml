@@ -31,7 +31,7 @@ jobs:
                 git -C rpcs3 reset --hard
             fi
       - save_cache:
-          key: source-v2-{{ .Branch }}-{{ .Revision }}
+          key: source-v2-{{ .Branch }}
           paths:
             - "~/rpcs3/.git"
             - "~/rpcs3/*/.git"
@@ -39,7 +39,8 @@ jobs:
 
       - restore_cache:
           keys:
-            -  build-v2-{{ .Revision }}-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+            - build-v2-{{ .Revision }}-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+            - build-v2-
       - run:
           name: Build and test
           command: |
@@ -52,7 +53,7 @@ jobs:
               - ~/.ccache
 
       - store_artifacts:
-          path: Docker_"$BUILD_TYPE"_"$CC"
+          path: ~/rpcs3/Docker_"$BUILD_TYPE"_"$CC"
       - store_test_results:
-          path: coverage
+          path: ~/rpcs3/coverage
 
