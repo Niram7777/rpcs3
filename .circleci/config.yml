@@ -7,6 +7,9 @@ version: 2.1
 
 jobs:
   build:
+    working_directory: $HOME
+    docker:
+      - image: docker
     environment:
       NAME: Ubuntu
       BUILD_TYPE: Debug
@@ -14,7 +17,17 @@ jobs:
       CC: clang
       CXX: clang++
     steps:
+      - restore_cache:
+          keys:
+            - source-v1-{{ .Branch }}-{{ .Revision }}
+            - source-v1-{{ .Branch }}-
+            - source-v1-
       - checkout
+      - save_cache:
+          key: source-v1-{{ .Branch }}-{{ .Revision }}
+          paths:
+            - ".git"
+
       - restore_cache:
         keys: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
       - run:
