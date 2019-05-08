@@ -6,8 +6,8 @@ version: 2.1
 jobs:
   build:
     working_directory: ~/
-    docker:
-      - image: ubuntu:rolling
+    machine:
+      image: ubuntu-1604:201903-01
     environment:
       NAME: Ubuntu
       BUILD_TYPE: Debug
