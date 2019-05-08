@@ -23,9 +23,13 @@ jobs:
       - run:
           name: Clone
           command: |
-            git clone -j $(nproc) --recurse-submodules --depth=1 --branch=$CIRCLE_BRANCH https://github.com/Niram7777/rpcs3.git rpcs3
-            git -C rpcs3 pull --recurse-submodules --depth=1
-            git -C rpcs3 submodule update --init --recursive --depth=1
+            if [ ! -d rpcs3 ];
+            then
+                git clone -j $(nproc) --recurse-submodules --depth=1 --branch=$CIRCLE_BRANCH https://github.com/Niram7777/rpcs3.git rpcs3
+            else
+                git -C rpcs3 pull --recurse-submodules --depth=1
+                git -C rpcs3 submodule update --init --recursive --depth=1
+            fi
       - save_cache:
           key: source-v1-{{ .Branch }}-{{ .Revision }}
           paths:
