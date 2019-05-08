@@ -28,15 +28,16 @@ jobs:
           - ".git"
       - restore_cache:
         keys: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
-      - run: |
-        umask 000
-        git clone https://github.com/Niram7777/nvidia-docker.git
-        make ubuntu-latest -C nvidia-docker &> nvidia-docker.log
-        docker build --build-arg U_ID="$(id -u)" --build-arg G_ID="$(id -g)" -t rpcs3 - < Dockerfile &> rpcs3-docker.log
-        source .dockerrc
-        ls *
-        docker_rpcs3 -u -m -t -c
-        bash <(curl -s https://codecov.io/bash) -s coverage/
+      - run:
+        command: |
+          umask 000
+          git clone https://github.com/Niram7777/nvidia-docker.git
+          make ubuntu-latest -C nvidia-docker &> nvidia-docker.log
+          docker build --build-arg U_ID="$(id -u)" --build-arg G_ID="$(id -g)" -t rpcs3 - < Dockerfile &> rpcs3-docker.log
+          source .dockerrc
+          ls *
+          docker_rpcs3 -u -m -t -c
+          bash <(curl -s https://codecov.io/bash) -s coverage/
       - save_cache:
         key: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
         paths:
