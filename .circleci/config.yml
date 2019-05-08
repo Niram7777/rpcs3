@@ -29,8 +29,7 @@ jobs:
             else
                 git -C rpcs3 pull --recurse-submodules
                 git -C rpcs3 submodule update --init --recursive
-                git reset --hard
-#                git submodule foreach --recursive git reset --hard
+                git -C rpcs3 reset --hard
             fi
       - save_cache:
           key: source-v1-{{ .Branch }}-{{ .Revision }}
