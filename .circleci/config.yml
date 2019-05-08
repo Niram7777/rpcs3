@@ -14,7 +14,7 @@ jobs:
       CC: clang
       CXX: clang++
     steps:
-      - run: apt update && apt install -y git make bash
+      - run: apt update && apt install -y git make
       - restore_cache:
           keys:
             - source-v1-{{ .Branch }}-{{ .Revision }}
@@ -24,7 +24,7 @@ jobs:
           name: Clone
           command: |
             git clone --depth=1 --branch=$CIRCLE_BRANCH https://github.com/Niram7777/rpcs3.git rpcs3
-            git -C rpcs3 submodule sync
+            git -C rpcs3 submodule sync  --depth=1
             git -C rpcs3 submodule update --init --recursive --depth=1
       - save_cache:
           key: source-v1-{{ .Branch }}-{{ .Revision }}
