@@ -14,12 +14,11 @@ jobs:
       CC: clang
       CXX: clang++
     steps:
-      - run: sudo apt install -y git make bash
       - restore_cache:
           keys:
-            - source-v1-{{ .Branch }}-{{ .Revision }}
-            - source-v1-{{ .Branch }}-
-            - source-v1-
+            - source-v2-{{ .Branch }}-{{ .Revision }}
+            - source-v2-{{ .Branch }}-
+            - source-v2-
       - run:
           name: Clone
           command: |
@@ -39,14 +38,14 @@ jobs:
             - "~/rpcs3/**/*/.git"
 
       - restore_cache:
-          keys: build-v1-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+          keys: build-v2-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
       - run:
           name: Build and test
           command: |
             cd ~/rpcs3
             bash ~/rpcs3/.circleci/build_test.sh
       - save_cache:
-          key: build-v1-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+          key: build-v2-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
           paths:
               - ~/rpcs3/Docker_\"$BUILD_TYPE\"_\"$CC\"
               - ~/.ccache
