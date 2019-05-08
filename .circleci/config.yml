@@ -1,7 +1,5 @@
-# Use the latest 2.1 version of CircleCI pipeline processing engine, see https://circleci.com/docs/2.0/configuration-reference/
 version: 2.1
 
-# Use a package of configuration called an orb, see https://circleci.com/docs/2.0/orb-intro/
 #orbs:
 #  codecov: codecov/codecov@1.0.4
 
@@ -13,7 +11,6 @@ jobs:
     environment:
       NAME: Ubuntu
       BUILD_TYPE: Debug
-#      BUILD_TYPE=Release
       CC: clang
       CXX: clang++
     steps:
@@ -23,27 +20,30 @@ jobs:
           - source-v1-{{ .Branch }}-
           - source-v1-
       - checkout
+      - run: git submodule sync
+      - run: git submodule update --init
       - save_cache:
         key: source-v1-{{ .Branch }}-{{ .Revision }}
         paths:
           - ".git"
-
       - restore_cache:
         keys: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
-      - run:
-        name: Building and testing
-        commands: |
-          umask 000
-          git clone https://github.com/Niram7777/nvidia-docker.git
-          make ubuntu-latest -C nvidia-docker &> nvidia-docker.log
-          docker build --build-arg U_ID="$(id -u)" --build-arg G_ID="$(id -g)" -t rpcs3 - < Dockerfile &> rpcs3-docker.log
-          source .dockerrc
-          ls *
-          docker_rpcs3 -u -m -t -c
-          bash <(curl -s https://codecov.io/bash) -s coverage/
+      - run: |
+        umask 000
+        git clone https://github.com/Niram7777/nvidia-docker.git
+        make ubuntu-latest -C nvidia-docker &> nvidia-docker.log
+        docker build --build-arg U_ID="$(id -u)" --build-arg G_ID="$(id -g)" -t rpcs3 - < Dockerfile &> rpcs3-docker.log
+        source .dockerrc
+        ls *
+        docker_rpcs3 -u -m -t -c
+        bash <(curl -s https://codecov.io/bash) -s coverage/
       - save_cache:
         key: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
         paths:
           - Docker_"$BUILD_TYPE"_"$CC"
           - ~/.ccache
+      - store_artifacts:
+        path: Docker_"$BUILD_TYPE"_"$CC"
+      - store_test_results:
+        path: coverage
 
