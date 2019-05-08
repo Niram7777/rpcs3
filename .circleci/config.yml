@@ -2,15 +2,35 @@
 version: 2.1
 
 # Use a package of configuration called an orb, see https://circleci.com/docs/2.0/orb-intro/
-orbs:
-  # Declare a dependency on the welcome-orb
-  welcome: circleci/welcome-orb@0.3.1
+#orbs:
+#  codecov: codecov/codecov@1.0.4
 
-# Orchestrate or schedule a set of jobs, see https://circleci.com/docs/2.0/workflows/
-workflows:
-  # Name the workflow "Welcome"
-  Welcome:
-    # Run the welcome/run job in its own container
-    jobs:
-      - welcome/run
+jobs:
+  build:
+    environment:
+      NAME: Ubuntu
+      BUILD_TYPE: Debug
+#      BUILD_TYPE=Release
+      CC: clang
+      CXX: clang++
+    steps:
+      - restore_cache:
+        keys:
+          - {{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+      - checkout
+      - run:
+        commands: |
+          umask 000
+          git clone https://github.com/Niram7777/nvidia-docker.git
+          make ubuntu-latest -C nvidia-docker &> nvidia-docker.log
+          docker build --build-arg U_ID="$(id -u)" --build-arg G_ID="$(id -g)" -t rpcs3 - < Dockerfile &> rpcs3-docker.log
+          source .dockerrc
+          ls *
+          docker_rpcs3 -u -m -t -c
+          bash <(curl -s https://codecov.io/bash) -s coverage/
+      - save_cache:
+        key: {{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+        paths:
+          - Docker_"$BUILD_TYPE"_"$CC"
+          - ~/.ccache
 

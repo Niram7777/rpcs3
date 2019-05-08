@@ -8,7 +8,7 @@ docker_rpcs3() {
     ENTRYPOINT_ARGS=$@
     DOCKER_RPCS3_SESSION="$PWD"
 
-    if id travis &> /dev/null;
+    if true;
     then
         echo "Without OpenGL/Vulkan"
     else
@@ -54,7 +54,7 @@ docker_rpcs3() {
         --user developer \
         -v "$DOCKER_RPCS3_SESSION":/home/developer/rpcs3 \
         -v "$DOCKER_RPCS3_SESSION"/.developer/xdg:/home/developer/xdg \
-        -v /home/travis/.ccache:/home/developer/.ccache \
+        -v ~/.ccache:/home/developer/.ccache \
         -v "$DOCKER_RPCS3_SESSION"/.developer/.cache:/home/developer/.cache/rpcs3 \
         -v "$DOCKER_RPCS3_SESSION"/.developer/.config:/home/developer/.config/rpcs3 \
         -e CC \
