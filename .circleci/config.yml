@@ -7,19 +7,40 @@ jobs:
   build:
     working_directory: ~/
     docker:
-      - image: docker
+      - image: ubuntu:rolling
     environment:
       NAME: Ubuntu
       BUILD_TYPE: Debug
       CC: clang
       CXX: clang++
     steps:
+      - restore_cache:
+          keys:
+            - source-v1-{{ .Branch }}-{{ .Revision }}
+            - source-v1-{{ .Branch }}-
+            - source-v1-
       - checkout
       - run: git submodule sync
-      - run: git submodule update --init
+      - run: git submodule update --init --recursive --depth=1
+
+      - save_cache:
+          key: source-v1-{{ .Branch }}-{{ .Revision }}
+          paths:
+            - ".git"
+
+      - restore_cache:
+          keys: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
       - run:
-          name: Creating Dummy Artifacts
-          command: ./build_test.sh
+          name: Build and test
+          command: |
+            find . -name build_test.sh
+            $(find . -name build_test.sh)/build_test.sh
+      - save_cache:
+          key: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+          paths:
+              - Docker_\"$BUILD_TYPE\"_\"$CC\"
+              - ~/.ccache
+
       - store_artifacts:
           path: Docker_"$BUILD_TYPE"_"$CC"
       - store_test_results:
