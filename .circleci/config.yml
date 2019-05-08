@@ -14,10 +14,9 @@ jobs:
       CC: clang
       CXX: clang++
     steps:
-      - restore_cache:
-        keys:
-          - {{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
       - checkout
+      - restore_cache:
+        keys: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
       - run:
         commands: |
           umask 000
@@ -29,7 +28,7 @@ jobs:
           docker_rpcs3 -u -m -t -c
           bash <(curl -s https://codecov.io/bash) -s coverage/
       - save_cache:
-        key: {{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+        key: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
         paths:
           - Docker_"$BUILD_TYPE"_"$CC"
           - ~/.ccache
