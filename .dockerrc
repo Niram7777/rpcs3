@@ -43,7 +43,7 @@ docker_rpcs3() {
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer/.cache ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer/.cache
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer/.config ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer/.config
 
-    docker run \
+    sudo docker run \
         $NVIDIA_ARGS \
         -ti \
         --rm \
