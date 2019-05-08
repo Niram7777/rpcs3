@@ -19,14 +19,14 @@ jobs:
             - source-v1-{{ .Branch }}-{{ .Revision }}
             - source-v1-{{ .Branch }}-
             - source-v1-
-      - checkout
+      - run: git clone --depth=1 --branch=$CIRCLE_BRANCH https://github.com/Niram7777/rpcs3.git .
       - run: git submodule sync
       - run: git submodule update --init --recursive --depth=1
-
       - save_cache:
           key: source-v1-{{ .Branch }}-{{ .Revision }}
           paths:
             - ".git"
+            - "*.git"
 
       - restore_cache:
           keys: cache-id_{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
