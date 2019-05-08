@@ -6,7 +6,6 @@ umask 000
 
 #. /opt/vulkansdk/1.1.101.0/setup-env.sh
 export PATH="/usr/lib/ccache:$PATH"
-ls -lah ~/.ccache
 echo "cache_dir = $HOME/.ccache" > ~/.ccache/ccache.conf
 ccache -F 0
 ccache -M 0
@@ -90,7 +89,7 @@ while getopts "h?vuamtc" opt; do
         ;;
     m)
         ccache -s
-        timeout 5400 bash -c make_project || echo "CI Pipeline: Too late!"
+        timeout 7200 bash -c make_project || echo "CI Pipeline: Too late!"
         ccache -s
         ;;
     t)

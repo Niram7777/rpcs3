@@ -31,23 +31,24 @@ jobs:
                 git -C rpcs3 reset --hard
             fi
       - save_cache:
-          key: source-v1-{{ .Branch }}-{{ .Revision }}
+          key: source-v2-{{ .Branch }}-{{ .Revision }}
           paths:
             - "~/rpcs3/.git"
             - "~/rpcs3/*/.git"
             - "~/rpcs3/**/*/.git"
 
       - restore_cache:
-          keys: build-v2-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+          keys:
+            -  build-v2-{{ .Revision }}-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
       - run:
           name: Build and test
           command: |
             cd ~/rpcs3
             bash ~/rpcs3/.circleci/build_test.sh
       - save_cache:
-          key: build-v2-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+          key: build-v2-{{ .Revision }}-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
           paths:
-              - ~/rpcs3/Docker_\"$BUILD_TYPE\"_\"$CC\"
+              - ~/rpcs3/Docker_"$BUILD_TYPE"_"$CC"
               - ~/.ccache
 
       - store_artifacts:
