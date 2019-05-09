@@ -18,7 +18,8 @@ jobs:
           name: Set Cache Env var
           command: |
             pyenv global 3.7.0
-            PREVIOUS_COMMIT=$(curl -s "https://api.github.com/repos/Niram7777/rpcs3/commits/nfmaster" | python3 -c "import sys, json; print(json.load(sys.stdin)['parents'][0]['sha'])")
+            PREVIOUS_COMMIT=$(curl -s "https://api.github.com/repos/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME/commits/$CIRCLE_BRANCH" | python3 -c "import sys, json; print(json.load(sys.stdin)['parents'][0]['sha'])")
+            echo $PREVIOUS_COMMIT
             echo "export PREVIOUS_COMMIT=$PREVIOUS_COMMIT" >> $BASH_ENV
       - restore_cache:
           keys:
@@ -29,9 +30,10 @@ jobs:
       - run:
           name: Clone
           command: |
+            echo $PREVIOUS_COMMIT
             if [ ! -d rpcs3 ];
             then
-                git clone -j $(nproc) --recurse-submodules --depth=1 --branch=$CIRCLE_BRANCH https://github.com/Niram7777/rpcs3.git rpcs3
+                git clone -j $(nproc) --recurse-submodules --depth=1 --branch=$CIRCLE_BRANCH https://github.com/$CIRCLE_PROJECT_USERNAME/$CIRCLE_PROJECT_REPONAME.git rpcs3
             else
                 git -C rpcs3 reset --hard
                 git -C rpcs3 submodule foreach --recursive git reset --hard
@@ -49,6 +51,7 @@ jobs:
           keys:
             - build-v3-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}-{{ .Revision }}
             - build-v3-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}-{{ .Environment.PREVIOUS_COMMIT }}
+            - build-v3-
       - run:
           name: Build and test
           command: |
