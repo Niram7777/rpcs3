@@ -14,9 +14,15 @@ jobs:
       CC: clang
       CXX: clang++
     steps:
+      - run:
+          name: Set Cache Env var
+          command: |
+            PREVIOUS_COMMIT=$(curl -s "https://api.github.com/repos/Niram7777/rpcs3/commits/nfmaster" | python3 -c "import sys, json; print(json.load(sys.stdin)['parents'][0]['sha'])")
+            echo "export PREVIOUS_COMMIT=$PREVIOUS_COMMIT" >> $BASH_ENV
       - restore_cache:
           keys:
             - source-v2-{{ .Branch }}-{{ .Revision }}
+            - source-v2-{{ .Branch }}-{{ .Environment.PREVIOUS_COMMIT }}
             - source-v2-{{ .Branch }}-
             - source-v2-
       - run:
@@ -32,7 +38,7 @@ jobs:
                 git -C rpcs3 pull --recurse-submodules
             fi
       - save_cache:
-          key: source-v2-{{ .Branch }}-
+          key: source-v2-{{ .Branch }}-{{ .Revision }}
           paths:
             - "~/rpcs3/.git"
             - "~/rpcs3/*/.git"
@@ -40,14 +46,15 @@ jobs:
 
       - restore_cache:
           keys:
-            - build-v2-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+            - build-v3-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}-{{ .Revision }}
+            - build-v3-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}-{{ .Environment.PREVIOUS_COMMIT }}
       - run:
           name: Build and test
           command: |
             cd ~/rpcs3
             bash ~/rpcs3/.circleci/build_test.sh
       - save_cache:
-          key: build-v2-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}
+          key: build-v3-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}-{{ .Revision }}
           paths:
               - ~/rpcs3/Docker_"$BUILD_TYPE"_"$CC"
               - ~/.ccache
