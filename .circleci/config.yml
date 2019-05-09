@@ -17,6 +17,7 @@ jobs:
       - run:
           name: Set Cache Env var
           command: |
+            pyenv global 3.7.0
             PREVIOUS_COMMIT=$(curl -s "https://api.github.com/repos/Niram7777/rpcs3/commits/nfmaster" | python3.7.0 -c "import sys, json; print(json.load(sys.stdin)['parents'][0]['sha'])")
             echo "export PREVIOUS_COMMIT=$PREVIOUS_COMMIT" >> $BASH_ENV
       - restore_cache:
