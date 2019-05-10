@@ -89,7 +89,9 @@ while getopts "h?vuamtc" opt; do
         ;;
     m)
         ccache -s
-        #timeout 14400 bash -c make_project || echo "CI Pipeline: Too late!"
+        find $PWD -name pause.png
+        ls -lah $(find $PWD -name pause.png)
+        timeout 14400 bash -c make_project || echo "CI Pipeline: Too late!"
         ccache -s
         ;;
     t)
