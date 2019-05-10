@@ -40,6 +40,7 @@ jobs:
                 git -C rpcs3 submodule update --init --recursive
                 git -C rpcs3 pull --recurse-submodules
             fi
+            find . -name pause.png
       - save_cache:
           key: source-v2-{{ .Branch }}-{{ .Revision }}
           paths:
