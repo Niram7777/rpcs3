@@ -40,7 +40,6 @@ jobs:
                 git -C rpcs3 submodule update --init --recursive
                 git -C rpcs3 pull --recurse-submodules
             fi
-            find . -name pause.png
       - save_cache:
           key: source-v2-{{ .Branch }}-{{ .Revision }}
           paths:
@@ -57,6 +56,7 @@ jobs:
           name: Build and test
           command: |
             cd ~/rpcs3
+            find $PWD -name pause.png
             bash ~/rpcs3/.circleci/build_test.sh
       - save_cache:
           key: build-v3-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}-{{ .Revision }}
