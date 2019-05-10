@@ -57,14 +57,15 @@ jobs:
           command: |
             cd ~/rpcs3
             bash ~/rpcs3/.circleci/build_test.sh
+            ln -s ~/rpcs3/Docker_"$BUILD_TYPE"_"$CC" ~/rpcs3/Docker
       - save_cache:
           key: build-v3-{{ .Environment.NAME }}-{{ .Environment.CC }}-{{ .Environment.BUILD_TYPE }}-{{ .Revision }}
           paths:
-              - ~/rpcs3/Docker_"$BUILD_TYPE"_"$CC"
+              - ~/rpcs3/Docker
               - ~/.ccache
 
       - store_artifacts:
-          path: ~/rpcs3/Docker_"$BUILD_TYPE"_"$CC"
+          path: ~/rpcs3/Docker
       - store_test_results:
           path: ~/rpcs3/coverage
 

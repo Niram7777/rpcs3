@@ -44,11 +44,15 @@ docker_rpcs3() {
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer/.cache ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer/.cache
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer/.config ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer/.config
 
+# curl -O https://raw.githubusercontent.com/moby/moby/master/profiles/seccomp/default.json
+# --security-opt="seccomp=default.json"
+
     sudo docker run \
         $NVIDIA_ARGS \
         -ti \
         --rm \
         --cap-add=SYS_PTRACE \
+        --security-opt="seccomp=unconfined" \
         $INPUT \
         $AUDIO \
         --group-add $(id -g) \
