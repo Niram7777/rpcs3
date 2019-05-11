@@ -7,6 +7,9 @@ umask 000
 #. /opt/vulkansdk/1.1.101.0/setup-env.sh
 export PATH="/usr/lib/ccache:$PATH"
 
+export QT_QPA_PLATFORM=offscreen
+#-platform vnc:size=1280x720:mode=websocket
+
 PAR_JOBS="-j$(nproc)"
 
 if [ -z "$CC" ] || [ -z "$CXX" ];
