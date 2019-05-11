@@ -44,6 +44,7 @@ docker_rpcs3() {
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer/.cache ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer/.cache
     [ ! -d "$DOCKER_RPCS3_SESSION"/.developer/.config ] && mkdir "$DOCKER_RPCS3_SESSION"/.developer/.config
 
+# Supposed to fix statx syscall for Qt but didnt worked... (seccomp=unconfined is less isolating)
 # curl -O https://raw.githubusercontent.com/moby/moby/master/profiles/seccomp/default.json
 # --security-opt="seccomp=default.json"
 

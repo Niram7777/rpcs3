@@ -26,7 +26,7 @@ env:
 cache:
   timeout: 6000
   directories:
-    - Docker_"$BUILD_TYPE"_"$CC"
+#    - Docker_"$BUILD_TYPE"_"$CC"
     - /home/travis/.ccache
 
 script:

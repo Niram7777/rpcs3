@@ -6,9 +6,6 @@ umask 000
 
 #. /opt/vulkansdk/1.1.101.0/setup-env.sh
 export PATH="/usr/lib/ccache:$PATH"
-echo "cache_dir = $HOME/.ccache" > ~/.ccache/ccache.conf
-ccache -F 0
-ccache -M 0
 
 PAR_JOBS="-j$(nproc)"
 
@@ -88,9 +85,11 @@ while getopts "h?vuamtc" opt; do
         run_static_analyse
         ;;
     m)
+        echo "cache_dir = $HOME/.ccache" > ~/.ccache/ccache.conf
+        ccache -F 0
+        ccache -M 0
+
         ccache -s
-        find $PWD -name pause.png
-        ls -lah $(find $PWD -name pause.png)
         timeout 14400 bash -c make_project || echo "CI Pipeline: Too late!"
         ccache -s
         ;;
@@ -107,7 +106,7 @@ while getopts "h?vuamtc" opt; do
 
         /usr/local/bin/kcov \
             --include-pattern=./rpcs3,./Utilities/,./3rdparty/,./Vulkan/ coverage/ \
-            ./Docker_$BUILD_TYPE_$CC/bin/rpcs3 --version
+            ./Docker_"$BUILD_TYPE"_"$CC"/bin/rpcs3 --version
         ;;
     esac
 done
